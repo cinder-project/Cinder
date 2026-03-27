@@ -11,6 +11,24 @@ java {
     }
 }
 
+sourceSets {
+    main {
+        java {
+            srcDirs = [
+                'server',
+                'entity',
+                'chunk',
+                'profiling'
+            ]
+        }
+    }
+    test {
+        java {
+            srcDirs = ['src/test/java']
+        }
+    }
+}
+
 repositories {
     mavenCentral()
 }
