@@ -1,0 +1,249 @@
+# =============================================================================
+# Cinder OS — packages.list
+# Minimal Debian ARM64 package manifest for Cinder OS base system
+#
+# Usage:
+#   This file is consumed by build-image.sh during image construction.
+#   Packages are installed in section order via debootstrap + chroot apt.
+#
+# Principles:
+#   - Every package here must earn its place. If Cinder does not use it
+#     directly, it should not be installed.
+#   - Desktop environments, X11, sound, Bluetooth, and any GUI toolkits
+#     are explicitly excluded. Cinder OS is a headless server OS.
+#   - Security packages are not optional. They are listed in their own
+#     section and must not be removed without a documented replacement.
+#   - Package versions are not pinned here; the build script pins to the
+#     Debian stable (bookworm) snapshot date recorded in build-image.sh.
+#   - Comments explain WHY each package is present, not just what it is.
+#     If you cannot explain why a package is here, remove it.
+#
+# Sections:
+#   1.  Base system essentials
+#   2.  Networking
+#   3.  Filesystem and storage
+#   4.  Java runtime
+#   5.  System monitoring and diagnostics
+#   6.  Security
+#   7.  Cinder tooling dependencies
+#   8.  Raspberry Pi 4 / ARM64 hardware support
+#   9.  Build-time only (not installed in final image)
+#
+# Format:
+#   package-name        # reason
+#   # SECTION: section name
+#   # EXCLUDE: package-name  # why it is explicitly excluded
+#
+# =============================================================================
+
+
+# =============================================================================
+# SECTION 1: Base system essentials
+# =============================================================================
+# The absolute minimum to have a functional, administrable Debian system.
+# No extras. No "might be useful" packages.
+
+base-files                  # Debian base filesystem hierarchy
+base-passwd                 # /etc/passwd and /etc/group base entries
+bash                        # Default shell for Cinder scripts
+coreutils                   # ls, cp, mv, rm, cat, etc.
+util-linux                  # mount, umount, lsblk, taskset, ionice, etc.
+procps                      # ps, top, free, vmstat — used by health-check scripts
+sysvinit-utils              # service command compatibility shim
+systemd                     # Init system and service manager
+systemd-sysv                # systemd SysV compatibility (update-rc.d etc.)
+dbus                        # Required by systemd for unit communication
+udev                        # Device manager — required for USB hotplug detection
+login                       # login, nologin, getty
+passwd                      # useradd, usermod, chpasswd
+shadow                      # /etc/shadow support for passwd
+sudo                        # Admin privilege escalation for cinder-admin user
+less                        # Pager for log review
+nano                        # Minimal editor for on-device config editing
+ca-certificates             # TLS root certificates — required for apt and Java TLS
+tzdata                      # Timezone data — chunk timestamps, backup filenames
+locales                     # UTF-8 locale — Java requires this for correct encoding
+
+# EXCLUDE: vim           # Too large for a minimal image; nano covers admin needs
+# EXCLUDE: emacs         # Absolutely not
+# EXCLUDE: manpages      # Save space; docs are in Cinder's own docs/ directory
+# EXCLUDE: info          # Same rationale as manpages
+
+
+# =============================================================================
+# SECTION 2: Networking
+# =============================================================================
+# Tools for network configuration, diagnostics, and service communication.
+# Pi 4 uses the built-in gigabit Ethernet (brcmstb GENET driver).
+
+iproute2                    # ip, ss, tc — modern network config (replaces net-tools)
+iputils-ping                # ping — basic reachability test
+curl                        # HTTP client — used by cinder-control health checks and update scripts
+wget                        # Fallback downloader for provisioning scripts
+openssl                     # TLS CLI — certificate verification, manual HTTPS tests
+nftables                    # Firewall — preferred over iptables on Debian bookworm ARM64
+net-tools                   # ifconfig, netstat — legacy compat; some Java tools reference these
+dnsutils                    # dig, nslookup — DNS diagnostics for control node name resolution
+hostname                    # Sets system hostname; referenced in Cinder Control node identity
+
+# EXCLUDE: wicd           # Wireless daemon — no WiFi in production Pi 4 server configs
+# EXCLUDE: wpasupplicant  # Same; Cinder OS targets wired Ethernet only
+# EXCLUDE: avahi-daemon   # mDNS discovery not needed in server context; attack surface
+
+
+# =============================================================================
+# SECTION 3: Filesystem and storage
+# =============================================================================
+# Storage management for world data, backups, USB import, and log rotation.
+
+e2fsprogs                   # ext4 filesystem tools — mkfs.ext4, fsck.ext4
+dosfstools                  # FAT32 tools — mkfs.vfat, fsck.vfat — for USB drive support
+exfatprogs                  # exFAT tools — modern exFAT (replaces exfat-fuse) for USB drives
+ntfs-3g                     # NTFS support — many users format USB drives on Windows
+parted                      # Partition management — used in build-image.sh
+fdisk                       # Disk partitioning — used in build-image.sh
+gdisk                       # GPT partition tool — for NVMe/SSD expansion path
+rsync                       # Used by usb-import.sh, backup scripts, and world sync
+gzip                        # Log compression — launch.sh rotates logs with gzip
+xz-utils                    # xz compression — Cinder OS image compression
+cpio                        # Initramfs tooling — required by kernel packaging
+btrfs-progs                 # Optional btrfs support for advanced NVMe setups
+smartmontools               # SMART disk health monitoring — valuable on SD cards
+logrotate                   # System log rotation complement to launch.sh rotation
+
+# EXCLUDE: lvm2          # LVM not needed on Pi 4 single-disk setups
+# EXCLUDE: mdadm         # Software RAID not applicable to Pi 4 deployments
+# EXCLUDE: zfsutils      # ZFS memory overhead incompatible with Pi 4 constraints
+
+
+# =============================================================================
+# SECTION 4: Java runtime
+# =============================================================================
+# Cinder Core requires Java 17+. We install 21 for ZGC availability and
+# long-term support horizon.
+
+openjdk-21-jre-headless     # Java 21 JRE, headless (no X11 dependency) — ARM64 build
+                            # Provides: /usr/lib/jvm/java-21-openjdk-arm64/
+                            # ~180MB installed; necessary and non-negotiable
+
+# EXCLUDE: default-jdk             # Pulls in full JDK including compiler; not needed at runtime
+# EXCLUDE: openjdk-17-jre-headless # Java 17 is minimum; we install 21 for ZGC + longevity
+# EXCLUDE: openjdk-21-jdk          # Full JDK includes javac; not needed on compute node
+# NOTE: If building Cinder Core on the Pi itself, add openjdk-21-jdk to the
+#       BUILD section below. Production images should use JRE only.
+
+
+# =============================================================================
+# SECTION 5: System monitoring and diagnostics
+# =============================================================================
+# Tools used by Cinder Control monitoring scripts, health checks, and
+# the cinder-bench measurement pipeline.
+
+sysstat                     # sar, iostat, mpstat — used by cinder-bench for system metrics
+htop                        # Interactive process viewer — admin convenience
+lsof                        # List open files — used in health-check.sh to inspect JVM handles
+strace                      # Syscall tracer — used for deep performance debugging
+perf-tools-unstable         # Linux perf — used by cinder-bench for hardware PMU counters
+                            # ARM64 Pi 4 perf support is functional (Cortex-A72 PMU)
+jq                          # JSON processor — parses last-launch.json, metrics output
+bc                          # Arithmetic — used in monitoring scripts for MSPT calculations
+time                        # /usr/bin/time — precise timing for benchmark scripts
+
+# EXCLUDE: valgrind       # Memory profiler; far too heavy for Pi 4 production use
+# EXCLUDE: gdb            # Debugger; not appropriate for production images
+
+
+# =============================================================================
+# SECTION 6: Security
+# =============================================================================
+# Hardening and access control. Not optional.
+
+openssh-server              # SSH access for remote administration
+fail2ban                    # Brute-force protection for SSH
+unattended-upgrades         # Automatic security updates (configured for security-only)
+apt-listchanges             # Notifies of changelog entries on upgrade
+libpam-pwquality            # Password quality enforcement
+ufw                         # Uncomplicated Firewall — used alongside nftables for
+                            # simple operator-facing rules
+rng-tools                   # Entropy daemon — ARM64 Pi 4 benefits from hwrng seeding
+                            # for Java's SecureRandom; reduces SSL handshake latency
+auditd                      # Audit daemon — logs security-relevant syscalls
+libcap2-bin                 # setcap — used to grant CAP_NET_BIND_SERVICE to Java
+                            # if Cinder Core ever binds to ports < 1024
+
+# EXCLUDE: iptables       # Replaced by nftables on bookworm; avoid running both
+# EXCLUDE: telnet         # Plaintext remote access; never appropriate
+# EXCLUDE: rsh-client     # Same rationale as telnet
+
+
+# =============================================================================
+# SECTION 7: Cinder tooling dependencies
+# =============================================================================
+# Packages required by Cinder's own shell scripts (launch.sh, usb-import.sh,
+# backup scripts, health-check.sh, build-image.sh).
+
+util-linux                  # Already listed; noted here: taskset, ionice are in util-linux
+schedutils                  # chrt — real-time scheduling tool; used by extreme preset tuning
+cpufrequtils                # cpufreq-set, cpufreq-info — CPU governor management
+                            # Used by prestart-check.sh for extreme/benchmark presets
+tmux                        # Terminal multiplexer — allows admin to attach to running sessions
+screen                      # Fallback multiplexer if tmux unavailable
+tree                        # Directory tree display — used in import validation output
+pv                          # Pipe viewer — shows progress during large backup operations
+git                         # Version control — for Cinder updates pulled from source
+python3                     # Python 3 runtime — used by auxiliary Cinder Control scripts
+python3-pip                 # Pip — for installing Python monitoring dependencies
+python3-venv                # Python virtual environments — isolates monitoring deps
+
+# EXCLUDE: python2        # End of life; not used anywhere in Cinder
+# EXCLUDE: ruby           # No Cinder tooling uses Ruby
+# EXCLUDE: perl           # Minimise attack surface; only stdlib perl is tolerated
+#                         # (perl-base is pulled in as a systemd dependency)
+
+
+# =============================================================================
+# SECTION 8: Raspberry Pi 4 / ARM64 hardware support
+# =============================================================================
+# Packages specific to Pi 4 hardware operation.
+# The Cinder OS image targets the Raspberry Pi OS Lite (bookworm) base,
+# which includes the Pi-specific kernel and firmware by default.
+# These packages supplement that base for server operation.
+
+raspi-config                # Pi configuration utility — GPIO, overclock, boot config
+raspi-utils                 # vcgencmd (temperature, throttle status), raspi-gpio
+libraspberrypi-bin          # Provides vcgencmd — used in prestart-check.sh for thermal checks
+libraspberrypi0             # Runtime library for raspi binaries
+firmware-brcm80211          # Broadcom WiFi firmware — included for completeness even though
+                            # Cinder OS uses wired Ethernet; avoids udev log noise
+rpi-eeprom                  # Pi 4 EEPROM update tool — for boot order configuration
+                            # (required when migrating from SD to USB/NVMe boot)
+i2c-tools                   # I2C bus utilities — useful for hardware monitoring expansion
+                            # (e.g., temperature sensors, OLED status displays)
+
+# EXCLUDE: xserver-xorg           # No display
+# EXCLUDE: raspberrypi-ui-mods    # No desktop
+# EXCLUDE: chromium-browser       # No browser
+# EXCLUDE: pulseaudio             # No audio
+# EXCLUDE: bluetooth              # No Bluetooth in server context
+# EXCLUDE: wpasupplicant          # No WiFi in production (already excluded above)
+
+
+# =============================================================================
+# SECTION 9: Build-time only
+# =============================================================================
+# These packages are installed in the build chroot during image construction
+# but are NOT included in the final deployed image. They are removed before
+# the image is compressed and written to SD card.
+#
+# build-image.sh installs these in a separate apt pass and purges them
+# before the final image snapshot.
+
+# BUILD_ONLY: debootstrap         # Bootstrap tool; not needed post-build
+# BUILD_ONLY: qemu-user-static    # ARM64 emulation on x86 build host
+# BUILD_ONLY: binfmt-support      # binfmt_misc for cross-arch chroot
+# BUILD_ONLY: openjdk-21-jdk      # Full JDK for compiling Cinder Core during provisioning
+# BUILD_ONLY: build-essential     # gcc, make — for any native compilation during build
+# BUILD_ONLY: cmake               # If any native deps require it
+# BUILD_ONLY: pkg-config          # Build dependency resolution
+# BUILD_ONLY: git                 # Already in section 7; needed early in build pipeline
+
