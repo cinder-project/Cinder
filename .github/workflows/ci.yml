@@ -13,6 +13,8 @@ concurrency:
 
 env:
   JAVA_VERSION: '21'
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+  GRADLE_VERSION: '8.11'
 
 jobs:
 
@@ -32,8 +34,10 @@ jobs:
           distribution: temurin
           cache: gradle
 
-      - name: Validate Gradle wrapper
-        uses: gradle/actions/wrapper-validation@v3
+      - name: Bootstrap Gradle wrapper
+        uses: gradle/actions/setup-gradle@v3
+        with:
+          gradle-version: ${{ env.GRADLE_VERSION }}
 
       - name: Set version
         id: version
@@ -48,10 +52,10 @@ jobs:
           echo "CINDER_VERSION=${VERSION}" >> "$GITHUB_ENV"
 
       - name: Build
-        run: ./gradlew assemble --no-daemon
+        run: gradle assemble --no-daemon
 
       - name: Test
-        run: ./gradlew test --no-daemon
+        run: gradle test --no-daemon
 
       - name: Upload test report
         if: failure()
@@ -86,9 +90,14 @@ jobs:
           distribution: temurin
           cache: gradle
 
+      - name: Bootstrap Gradle wrapper
+        uses: gradle/actions/setup-gradle@v3
+        with:
+          gradle-version: ${{ env.GRADLE_VERSION }}
+
       - name: Compile for ARM64 target
         run: |
-          ./gradlew compileJava \
+          gradle compileJava \
             --no-daemon \
             -Porg.gradle.java.home="$JAVA_HOME"
         env:
@@ -131,8 +140,13 @@ jobs:
           echo "CINDER_VERSION=${VERSION}" >> "$GITHUB_ENV"
           echo "VERSION=${VERSION}" >> "$GITHUB_ENV"
 
+      - name: Bootstrap Gradle wrapper
+        uses: gradle/actions/setup-gradle@v3
+        with:
+          gradle-version: ${{ env.GRADLE_VERSION }}
+
       - name: Build release JARs
-        run: ./gradlew assemble --no-daemon
+        run: gradle assemble --no-daemon
 
       - name: Generate checksums
         run: |
