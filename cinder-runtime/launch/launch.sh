@@ -1,0 +1,438 @@
+#!/usr/bin/env bash
+# =============================================================================
+# Cinder Runtime — launch.sh
+# Production launch script for Cinder Core on Raspberry Pi 4 / Pi 400
+#
+# Responsibilities:
+#   - Validate the runtime environment (Java version, memory, filesystem)
+#   - Load a named tuning preset (survival, event, benchmark, low-power, extreme)
+#   - Apply JVM flags tuned for ARM64 + LPDDR4 + constrained heap
+#   - Pin the JVM process to CPU cores via taskset (leaves core 0 for OS)
+#   - Set process priority (nice / ionice)
+#   - Launch Cinder Core with a watchdog restart loop
+#   - Rotate logs on startup
+#   - Emit structured launch metadata for Cinder Control
+#
+# Usage:
+#   ./launch.sh [--preset <name>] [--dry-run] [--no-watchdog] [--debug]
+#
+#   Defaults:
+#     --preset    survival
+#     --dry-run   false (set to print resolved config without launching)
+#     --no-watchdog  false
+#     --debug     false (enables JVM debug port 5005)
+#
+# Environment variables (override config file values):
+#   CINDER_HEAP_MIN     Minimum JVM heap (e.g. 512m)
+#   CINDER_HEAP_MAX     Maximum JVM heap (e.g. 2g)
+#   CINDER_JAR          Path to cinder-core jar
+#   CINDER_WORLD_DIR    Path to world data directory
+#   CINDER_LOG_DIR      Path to log output directory
+#   CINDER_PRESET_DIR   Path to preset directory
+#
+# Exit codes:
+#   0   Clean shutdown (server exited with code 0)
+#   1   Launch precondition failure (bad environment, missing files)
+#   2   Server exited with non-zero code and watchdog gave up
+#   3   Killed by operator signal (SIGTERM / SIGINT to launch.sh)
+#
+# =============================================================================
+
+set -euo pipefail
+IFS=$'\n\t'
+
+# ── Script identity ───────────────────────────────────────────────────────────
+
+readonly CINDER_VERSION="0.1.0-dev"
+readonly SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+readonly SCRIPT_NAME="$(basename "${BASH_SOURCE[0]}")"
+readonly LAUNCH_TIMESTAMP="$(date -u +%Y%m%dT%H%M%SZ)"
+
+# ── Default paths ─────────────────────────────────────────────────────────────
+
+: "${CINDER_BASE_DIR:="${SCRIPT_DIR}/../.."}"
+: "${CINDER_JAR:="${SCRIPT_DIR}/../../cinder-core/build/libs/cinder-core.jar"}"
+: "${CINDER_WORLD_DIR:="${CINDER_BASE_DIR}/world"}"
+: "${CINDER_LOG_DIR:="${CINDER_BASE_DIR}/logs"}"
+: "${CINDER_PRESET_DIR:="${SCRIPT_DIR}/../presets"}"
+: "${CINDER_BACKUP_DIR:="${CINDER_BASE_DIR}/backups"}"
+
+# ── Default tuning ────────────────────────────────────────────────────────────
+
+: "${CINDER_HEAP_MIN:="512m"}"
+: "${CINDER_HEAP_MAX:="2g"}"
+: "${CINDER_PRESET:="survival"}"
+: "${CINDER_MAIN_CLASS:="dev.cinder.server.CinderServer"}"
+
+# ── Watchdog defaults ─────────────────────────────────────────────────────────
+
+readonly WATCHDOG_MAX_RESTARTS=5
+readonly WATCHDOG_RESTART_DELAY_S=10
+readonly WATCHDOG_CRASH_WINDOW_S=300   # Restarts within this window count toward limit
+
+# ── Argument parsing ──────────────────────────────────────────────────────────
+
+OPT_PRESET="${CINDER_PRESET}"
+OPT_DRY_RUN=false
+OPT_NO_WATCHDOG=false
+OPT_DEBUG=false
+
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --preset)
+            OPT_PRESET="$2"; shift 2 ;;
+        --dry-run)
+            OPT_DRY_RUN=true; shift ;;
+        --no-watchdog)
+            OPT_NO_WATCHDOG=true; shift ;;
+        --debug)
+            OPT_DEBUG=true; shift ;;
+        --heap-max)
+            CINDER_HEAP_MAX="$2"; shift 2 ;;
+        --heap-min)
+            CINDER_HEAP_MIN="$2"; shift 2 ;;
+        -h|--help)
+            grep '^#' "$0" | head -40 | sed 's/^# \{0,1\}//'
+            exit 0 ;;
+        *)
+            echo "[launch] Unknown argument: $1" >&2; exit 1 ;;
+    esac
+done
+
+# ── Logging helpers ───────────────────────────────────────────────────────────
+
+mkdir -p "${CINDER_LOG_DIR}"
+LAUNCH_LOG="${CINDER_LOG_DIR}/launch-${LAUNCH_TIMESTAMP}.log"
+
+log()  { local msg="[$(date -u +%H:%M:%S)] [launch] $*"; echo "${msg}"; echo "${msg}" >> "${LAUNCH_LOG}"; }
+warn() { local msg="[$(date -u +%H:%M:%S)] [launch:WARN] $*"; echo "${msg}" >&2; echo "${msg}" >> "${LAUNCH_LOG}"; }
+die()  { local msg="[$(date -u +%H:%M:%S)] [launch:FATAL] $*"; echo "${msg}" >&2; echo "${msg}" >> "${LAUNCH_LOG}"; exit 1; }
+
+log "Cinder Runtime ${CINDER_VERSION} — launch.sh starting"
+log "Preset: ${OPT_PRESET} | dry-run: ${OPT_DRY_RUN} | watchdog: $( [[ "${OPT_NO_WATCHDOG}" == true ]] && echo disabled || echo enabled )"
+
+# ── Load preset ───────────────────────────────────────────────────────────────
+
+PRESET_FILE="${CINDER_PRESET_DIR}/${OPT_PRESET}.conf"
+
+if [[ ! -f "${PRESET_FILE}" ]]; then
+    die "Preset file not found: ${PRESET_FILE}"
+fi
+
+log "Loading preset: ${PRESET_FILE}"
+
+# Source the preset. Preset files set variables like:
+#   PRESET_HEAP_MAX, PRESET_HEAP_MIN, PRESET_GC_FLAGS, PRESET_EXTRA_FLAGS
+# Variables set in the environment take precedence over preset defaults.
+# shellcheck source=/dev/null
+source "${PRESET_FILE}"
+
+# Allow preset to override heap if not set in environment.
+: "${CINDER_HEAP_MIN:="${PRESET_HEAP_MIN:-"512m"}"}"
+: "${CINDER_HEAP_MAX:="${PRESET_HEAP_MAX:-"2g"}"}"
+
+# ── Environment validation ────────────────────────────────────────────────────
+
+log "Validating runtime environment..."
+
+# Java version check: require Java 17+
+if ! command -v java &>/dev/null; then
+    die "java not found in PATH. Install OpenJDK 17+ (ARM64): apt install openjdk-21-jre-headless"
+fi
+
+JAVA_VERSION_OUTPUT="$(java -version 2>&1 | head -1)"
+JAVA_MAJOR="$(java -version 2>&1 | grep -oP '(?<=version ")\d+' | head -1)"
+
+if [[ -z "${JAVA_MAJOR}" || "${JAVA_MAJOR}" -lt 17 ]]; then
+    die "Java 17+ required. Found: ${JAVA_VERSION_OUTPUT}"
+fi
+
+log "Java: ${JAVA_VERSION_OUTPUT} (major=${JAVA_MAJOR})"
+
+# Jar exists check
+if [[ ! -f "${CINDER_JAR}" ]]; then
+    die "Cinder jar not found: ${CINDER_JAR}"
+fi
+
+# World directory
+if [[ ! -d "${CINDER_WORLD_DIR}" ]]; then
+    warn "World directory not found; creating: ${CINDER_WORLD_DIR}"
+    mkdir -p "${CINDER_WORLD_DIR}"
+fi
+
+# Available RAM check: warn if system RAM is under 4GB
+TOTAL_KB="$(grep MemTotal /proc/meminfo | awk '{print $2}')"
+TOTAL_MB=$(( TOTAL_KB / 1024 ))
+if [[ "${TOTAL_MB}" -lt 4096 ]]; then
+    warn "System RAM is ${TOTAL_MB} MB — recommend 8GB Pi 4 for stable hosting"
+fi
+
+log "System RAM: ${TOTAL_MB} MB"
+
+# Filesystem: warn if running from microSD (detect mmcblk backing the jar path)
+JAR_DEVICE="$(df "${CINDER_JAR}" | tail -1 | awk '{print $1}')"
+if echo "${JAR_DEVICE}" | grep -q "mmcblk"; then
+    warn "Running from microSD (${JAR_DEVICE}). Chunk IO will be slower than USB SSD."
+    warn "Consider: cinder-runtime/docs/ssd-migration.md"
+fi
+
+# ── CPU core detection and affinity ──────────────────────────────────────────
+
+NPROC="$(nproc)"
+log "CPU cores detected: ${NPROC}"
+
+# Build a cpuset string for taskset.
+# Strategy:
+#   - Reserve CPU 0 for OS, IRQ handlers, and control-plane services.
+#   - Assign CPUs 1..N-1 to the JVM.
+# On Pi 4 (quad-core): JVM gets cores 1,2,3 — OS and network IRQ use core 0.
+if [[ "${NPROC}" -ge 2 ]]; then
+    CPU_AFFINITY="1-$(( NPROC - 1 ))"
+else
+    CPU_AFFINITY="0"
+    warn "Single-core system detected — skipping CPU affinity isolation."
+fi
+
+log "JVM CPU affinity: ${CPU_AFFINITY}"
+
+# ── JVM flag assembly ─────────────────────────────────────────────────────────
+
+# Base memory flags
+JVM_MEMORY_FLAGS=(
+    "-Xms${CINDER_HEAP_MIN}"
+    "-Xmx${CINDER_HEAP_MAX}"
+)
+
+# GC: Use G1GC with tunings appropriate for ARM64 LPDDR4.
+# ZGC is available in Java 21 and may be preferable for very low-pause targets,
+# but G1GC is more predictable at the heap sizes used on Pi 4 (<= 3GB).
+JVM_GC_FLAGS=(
+    "-XX:+UseG1GC"
+    "-XX:MaxGCPauseMillis=20"           # Target max GC pause of 20ms
+    "-XX:G1HeapRegionSize=8m"           # 8MB regions; suits 1-3GB heap on Pi 4
+    "-XX:G1NewSizePercent=20"           # Start young gen at 20% of heap
+    "-XX:G1MaxNewSizePercent=40"        # Cap young gen at 40% of heap
+    "-XX:G1MixedGCCountTarget=4"        # Mixed GC in 4 increments; reduces pause length
+    "-XX:InitiatingHeapOccupancyPercent=15"  # Begin concurrent marking early
+    "-XX:SurvivorRatio=32"              # Reduce survivor space overhead
+    "-XX:+PerfDisableSharedMem"         # Disable perfdata shared mem (reduces /tmp noise)
+    "-XX:-OmitStackTraceInFastThrow"    # Preserve stack traces in hot exceptions
+)
+
+# Allow preset to override GC flags (e.g., low-power preset may use SerialGC)
+if [[ -n "${PRESET_GC_FLAGS:-}" ]]; then
+    # shellcheck disable=SC2206
+    JVM_GC_FLAGS=(${PRESET_GC_FLAGS})
+    log "GC flags overridden by preset."
+fi
+
+# JIT / runtime flags for ARM64
+JVM_RUNTIME_FLAGS=(
+    "-server"
+    "-XX:+AlwaysPreTouch"               # Pre-fault heap pages at startup; avoids runtime faults
+    "-XX:+DisableExplicitGC"            # Ignore System.gc() calls from plugins
+    "-XX:+UseStringDeduplication"       # Reduce string heap usage (entity names, block types)
+    "-Djava.awt.headless=true"          # No display needed on Pi
+    "-Dfile.encoding=UTF-8"
+    "-Dcinder.preset=${OPT_PRESET}"
+    "-Dcinder.version=${CINDER_VERSION}"
+    "-Dcinder.worldDir=${CINDER_WORLD_DIR}"
+    "-Dcinder.logDir=${CINDER_LOG_DIR}"
+)
+
+# Debug flags (only when --debug is passed)
+JVM_DEBUG_FLAGS=()
+if [[ "${OPT_DEBUG}" == true ]]; then
+    JVM_DEBUG_FLAGS=(
+        "-agentlib:jdwp=transport=dt_socket,server=y,suspend=n,address=*:5005"
+    )
+    warn "Debug mode enabled — JVM debug port 5005 open (not for production!)"
+fi
+
+# Merge preset extra flags
+PRESET_EXTRA_ARR=()
+if [[ -n "${PRESET_EXTRA_FLAGS:-}" ]]; then
+    # shellcheck disable=SC2206
+    PRESET_EXTRA_ARR=(${PRESET_EXTRA_FLAGS})
+fi
+
+# Assemble full JVM args array
+JVM_ARGS=(
+    "${JVM_MEMORY_FLAGS[@]}"
+    "${JVM_GC_FLAGS[@]}"
+    "${JVM_RUNTIME_FLAGS[@]}"
+    "${JVM_DEBUG_FLAGS[@]}"
+    "${PRESET_EXTRA_ARR[@]}"
+)
+
+# ── Log rotation ──────────────────────────────────────────────────────────────
+
+SERVER_LOG="${CINDER_LOG_DIR}/cinder-server.log"
+
+# Rotate previous server log if it exists and is non-empty
+if [[ -s "${SERVER_LOG}" ]]; then
+    ROTATED="${CINDER_LOG_DIR}/cinder-server-$(date -u +%Y%m%dT%H%M%SZ).log.gz"
+    gzip -c "${SERVER_LOG}" > "${ROTATED}" && : > "${SERVER_LOG}"
+    log "Rotated previous server log → ${ROTATED}"
+fi
+
+# Prune logs older than 14 days
+find "${CINDER_LOG_DIR}" -name "cinder-server-*.log.gz" -mtime +14 -delete 2>/dev/null || true
+
+# ── Dry run output ────────────────────────────────────────────────────────────
+
+if [[ "${OPT_DRY_RUN}" == true ]]; then
+    log "=== DRY RUN — resolved launch configuration ==="
+    log "JAR:          ${CINDER_JAR}"
+    log "World:        ${CINDER_WORLD_DIR}"
+    log "Logs:         ${CINDER_LOG_DIR}"
+    log "Preset:       ${OPT_PRESET} (${PRESET_FILE})"
+    log "Heap:         ${CINDER_HEAP_MIN} – ${CINDER_HEAP_MAX}"
+    log "CPU affinity: ${CPU_AFFINITY}"
+    log "JVM args:"
+    for flag in "${JVM_ARGS[@]}"; do
+        log "  ${flag}"
+    done
+    log "=== Dry run complete. Exiting. ==="
+    exit 0
+fi
+
+# ── Signal handling ───────────────────────────────────────────────────────────
+
+SERVER_PID=""
+WATCHDOG_STOP=false
+
+_handle_sigterm() {
+    log "Received SIGTERM — requesting clean server shutdown..."
+    WATCHDOG_STOP=true
+    if [[ -n "${SERVER_PID}" ]]; then
+        kill -TERM "${SERVER_PID}" 2>/dev/null || true
+    fi
+}
+
+_handle_sigint() {
+    log "Received SIGINT — requesting clean server shutdown..."
+    WATCHDOG_STOP=true
+    if [[ -n "${SERVER_PID}" ]]; then
+        kill -TERM "${SERVER_PID}" 2>/dev/null || true
+    fi
+}
+
+trap '_handle_sigterm' TERM
+trap '_handle_sigint'  INT
+
+# ── Launch function ───────────────────────────────────────────────────────────
+
+launch_server() {
+    log "──────────────────────────────────────────────"
+    log "Launching Cinder Core"
+    log "  JAR:     ${CINDER_JAR}"
+    log "  Preset:  ${OPT_PRESET}"
+    log "  Heap:    ${CINDER_HEAP_MIN} – ${CINDER_HEAP_MAX}"
+    log "  Affinity: ${CPU_AFFINITY}"
+    log "──────────────────────────────────────────────"
+
+    # Emit structured launch metadata for Cinder Control
+    cat > "${CINDER_LOG_DIR}/last-launch.json" <<-EOF
+	{
+	  "cinderVersion": "${CINDER_VERSION}",
+	  "preset":        "${OPT_PRESET}",
+	  "heapMin":       "${CINDER_HEAP_MIN}",
+	  "heapMax":       "${CINDER_HEAP_MAX}",
+	  "cpuAffinity":   "${CPU_AFFINITY}",
+	  "javaVersion":   "${JAVA_VERSION_OUTPUT}",
+	  "launchTime":    "${LAUNCH_TIMESTAMP}",
+	  "jar":           "${CINDER_JAR}",
+	  "worldDir":      "${CINDER_WORLD_DIR}"
+	}
+	EOF
+
+    # Build the full command line
+    CMD=(
+        taskset --cpu-list "${CPU_AFFINITY}"
+        nice -n -5
+        ionice -c 1 -n 2
+        java "${JVM_ARGS[@]}"
+        -cp "${CINDER_JAR}"
+        "${CINDER_MAIN_CLASS}"
+        --preset "${OPT_PRESET}"
+        --world  "${CINDER_WORLD_DIR}"
+        --logdir "${CINDER_LOG_DIR}"
+    )
+
+    # Launch, piping stdout/stderr to the server log and the terminal
+    "${CMD[@]}" 2>&1 | tee -a "${SERVER_LOG}" &
+    SERVER_PID=$!
+
+    log "Server process PID: ${SERVER_PID}"
+    echo "${SERVER_PID}" > "${CINDER_LOG_DIR}/cinder.pid"
+
+    # Wait for the server process to exit
+    wait "${SERVER_PID}"
+    EXIT_CODE=$?
+
+    rm -f "${CINDER_LOG_DIR}/cinder.pid"
+    log "Server process exited with code ${EXIT_CODE}"
+    return "${EXIT_CODE}"
+}
+
+# ── Watchdog loop ─────────────────────────────────────────────────────────────
+
+if [[ "${OPT_NO_WATCHDOG}" == true ]]; then
+    # Single launch, no restart
+    launch_server
+    EXIT_CODE=$?
+    log "No-watchdog mode. Exiting with code ${EXIT_CODE}."
+    exit "${EXIT_CODE}"
+fi
+
+# Watchdog: restart on crash, up to WATCHDOG_MAX_RESTARTS times within
+# WATCHDOG_CRASH_WINDOW_S seconds. If the server runs cleanly for longer
+# than the window, the restart counter resets.
+
+RESTART_COUNT=0
+WINDOW_START="$(date +%s)"
+
+while true; do
+    if [[ "${WATCHDOG_STOP}" == true ]]; then
+        log "Watchdog stopping cleanly (operator signal)."
+        exit 3
+    fi
+
+    launch_server
+    EXIT_CODE=$?
+
+    # Exit code 0 = clean shutdown (operator stop command, etc.)
+    if [[ "${EXIT_CODE}" -eq 0 ]]; then
+        log "Server shut down cleanly. Watchdog exiting."
+        exit 0
+    fi
+
+    # Operator signal was handled during launch
+    if [[ "${WATCHDOG_STOP}" == true ]]; then
+        log "Watchdog stopping after server exit (operator signal)."
+        exit 3
+    fi
+
+    NOW="$(date +%s)"
+    WINDOW_ELAPSED=$(( NOW - WINDOW_START ))
+
+    # Reset the restart counter if we've been stable longer than the window
+    if [[ "${WINDOW_ELAPSED}" -gt "${WATCHDOG_CRASH_WINDOW_S}" ]]; then
+        log "Watchdog: server was stable for ${WINDOW_ELAPSED}s — resetting restart counter."
+        RESTART_COUNT=0
+        WINDOW_START="${NOW}"
+    fi
+
+    RESTART_COUNT=$(( RESTART_COUNT + 1 ))
+
+    if [[ "${RESTART_COUNT}" -gt "${WATCHDOG_MAX_RESTARTS}" ]]; then
+        warn "Watchdog: server crashed ${RESTART_COUNT} times within ${WATCHDOG_CRASH_WINDOW_S}s."
+        warn "Giving up. Check logs: ${SERVER_LOG}"
+        warn "To restart manually: ${SCRIPT_DIR}/${SCRIPT_NAME} --preset ${OPT_PRESET}"
+        exit 2
+    fi
+
+    warn "Watchdog: server crashed (exit=${EXIT_CODE}). Restart ${RESTART_COUNT}/${WATCHDOG_MAX_RESTARTS} in ${WATCHDOG_RESTART_DELAY_S}s..."
+    sleep "${WATCHDOG_RESTART_DELAY_S}"
+done
