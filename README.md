@@ -1,117 +1,119 @@
 <div align="center">
 
+<a href="https://discord.gg/fxWv9hG3uv">
+  <img src="cinder.png" alt="CinderMC Logo" width="200"/>
+</a>
+
 # CinderMC
 
-<img src="cinder.png" alt="Cinder Logo" width="200"/>
-
-CinderMC is a custom Minecraft server platform and integrated Linux distribution designed for Raspberry Pi 4 and Raspberry Pi 400 hardware. It is engineered from the ground up for **performance, stability, and modularity**, combining server optimization, modular plugin/mod support, and system-level enhancements for ARM-based hardware.
-
----
-
-## Overview
-
-CinderMC is not a fork of any existing server software. It is built as a **completely original server platform** designed to:
-
-- Handle standard SMP gameplay and large-scale public events with consistent performance.
-- Provide a modular, extensible architecture for adding gameplay features, mods, or custom content.
-- Leverage ARM-optimized code paths and system-level tuning for Raspberry Pi hardware.
-- Integrate with a custom Linux distribution for maximum control and lightweight operation.
-
-CinderMC integrates server and OS-level improvements, bridging **low-level Linux optimization** with **high-level server mechanics**, allowing maximum performance without sacrificing flexibility.
+CinderMC is a **fully custom Minecraft server platform** designed from the ground up for **ARM hardware** (Raspberry Pi 4 & 400) and **Debian-based systems**.  
+Built for **high-performance, modularity, and extensibility**, it integrates OS-level optimizations, tick management, and plugin/mod support for maximum efficiency.
 
 ---
-
-## Architecture
-
-### System Design
-
-CinderMC runs on a **dual-node architecture**:
-
-1. **Control Node** – Manages networking, proxies, background services, and monitoring.
-2. **Compute Node** – Hosts the Minecraft server process, entity logic, chunk processing, and event handling.
-
-Nodes communicate via **high-speed Ethernet**, ensuring minimal latency and clear separation of responsibilities. The architecture allows scaling for both small SMP sessions and large community events without impacting gameplay.
-
----
-
-### Core Components
-
-- **Custom Server Engine**: Built entirely from scratch, CinderMC introduces:
-  - Advanced tick loop management
-  - Efficient chunk loading and caching
-  - Optimized entity processing pipelines
-  - Asynchronous task handling for non-critical operations
-- **Modular Plugin Interface**: A high-performance API allows developers to inject functionality without affecting core server stability.
-- **ARM Optimized JVM Integration**: Fine-tuned Java Virtual Machine settings for low-latency tick execution and memory efficiency.
-- **Integrated Resource Loader**: Allows importing of mods and plugins via USB or external storage without system interruption.
-
----
-
-### Linux Distribution
-
-The CinderOS distribution is a minimal, Debian-based ARM system tailored for Minecraft server workloads:
-
-- Stripped-down to essential services for optimal performance.
-- Preconfigured for **real-time networking** and **low-latency I/O**.
-- Includes drivers and optimizations for Raspberry Pi 4/400 hardware.
-- Designed for modular expansion: server updates, mods, and assets can be applied offline via external storage.
-
----
-
-### Performance Optimization
-
-CinderMC emphasizes **performance predictability**:
-
-- **Tick Loop Optimization**: Ensures stable server ticks even under high entity load.
-- **Memory Management**: Custom caching and garbage collection strategies to reduce latency spikes.
-- **Network Efficiency**: Asynchronous handling of non-critical packets reduces bottlenecks during large-scale events.
-- **Entity & World Processing**: Efficient algorithms for large numbers of entities, block updates, and complex interactions.
-
----
-
-### Extensibility
-
-CinderMC supports extensive extensibility:
-
-- **Mod and Plugin API**: Allows developers to implement new gameplay mechanics, optimizations, or events.
-- **Dynamic Resource Import**: External storage devices can be used to add maps, mods, or plugins without downtime.
-- **Configuration Layering**: Each node can have independent configurations, allowing granular control over performance, gameplay, and debugging.
-
----
-
-### Security & Stability
-
-CinderMC is designed for **high reliability**:
-
-- Isolated server processes per node to avoid cascading failures.
-- Strict validation of imported mods and plugins to prevent runtime errors.
-- ARM-level security patches applied in CinderOS for robust protection against exploits.
-
----
-
-### Design Philosophy
-
-CinderMC embodies:
-
-- **Performance First**: Every layer of the system is optimized for low-latency and consistent server behavior.
-- **Modularity**: Separation of concerns across nodes and processes ensures scalability and maintainability.
-- **Player-Focused Experience**: Optimizations target gameplay performance without sacrificing flexibility or modding capability.
-- **Cinematic Infrastructure**: Every subsystem is designed to be observable and controllable, providing transparency and reliability.
-
----
-
-### Use Cases
-
-- Small SMP servers for casual groups.
-- Large-scale community or public events.
-- Development and testing of new gameplay mechanics.
-- ARM-based experimental server deployments.
-
----
-
-### Contact
-
-Join the community and follow development on Discord:  
-[https://discord.gg/fxWv9hG3uv](https://discord.gg/fxWv9hG3uv)
 
 </div>
+
+## Core Architecture
+
+CinderMC is structured as a **modular, multi-node server platform**:
+
+| Layer | Function |
+|-------|---------|
+| **Control Node** | Manages networking, monitoring, and orchestration of compute nodes. |
+| **Compute Node** | Handles server logic, chunk loading, entity processing, and asynchronous tasks. |
+| **Plugin/Mod API** | Fully isolated, high-performance interface for injecting gameplay functionality. |
+| **CinderOS** | Minimal Debian-based ARM OS optimized for real-time networking and low-latency I/O. |
+
+**Node communication** is via high-speed Ethernet with **asynchronous packet handling** to eliminate tick lag.  
+
+---
+
+## Performance & Optimization
+
+CinderMC implements advanced performance strategies:
+
+- **Tick Loop Management** – deterministic tick timing, prioritization of critical operations.
+- **Memory Optimization** – cache-aware structures, ARM-specific GC tuning.
+- **Chunk & Entity Pipeline** – parallelized loading, spatial partitioning for entity updates.
+- **Network Efficiency** – lightweight packet serialization and async event processing.
+- **Hardware-Level Tuning** – CPU affinity, GPU acceleration for optional rendering tasks, and low-latency I/O scheduling.
+
+---
+
+## Modularity & Extensibility
+
+CinderMC is built to allow:
+
+- **Dynamic Module Injection** – mods/plugins load/unload without server restarts.
+- **Layered Configuration** – node-specific, global, and runtime overrides.
+- **Resource Isolation** – sandboxed plugin environments prevent runtime conflicts.
+- **ARM Storage Hotplug** – external devices can provide additional assets, mods, or maps without interrupting server uptime.
+
+---
+
+## Security & Reliability
+
+CinderMC prioritizes **stability and isolation**:
+
+- Process isolation per node to avoid cascading failures.
+- Strict validation of mods/plugins before runtime execution.
+- CinderOS hardened with **latest Debian ARM security patches**.
+- Real-time monitoring and logging of entity updates, tick anomalies, and resource usage.
+
+---
+
+## Design Philosophy
+
+1. **Performance First** – every subsystem optimized for minimal latency.  
+2. **Observability** – full introspection and logging of internal processes.  
+3. **Scalable Modularity** – nodes and modules can expand independently.  
+4. **Player-Centric** – optimizations target gameplay experience, not just server stats.  
+5. **ARM-Native Integration** – deep alignment with Raspberry Pi architecture for maximum efficiency.
+
+---
+
+## API & Modding
+
+CinderMC provides a **fully custom plugin API**:
+
+- Async-safe event hooks for tick, entity, and world events.
+- Chunk and world manipulation API with native ARM acceleration.
+- Integration with CinderOS for direct hardware access if needed.
+- Dynamic plugin loading/unloading with runtime dependency resolution.
+
+---
+
+## Metrics & Monitoring
+
+CinderMC exposes detailed runtime metrics:
+
+- Tick execution time distribution per node.
+- Entity and block update counters with historical tracking.
+- Network latency heatmaps for connected clients.
+- Memory and CPU usage per plugin/module.
+- Real-time logging for debugging and performance tuning.
+
+---
+
+## Supported Use Cases
+
+- SMP servers for small groups or private communities.
+- Large-scale public servers with thousands of entities.
+- Experimental mod/plugin testing environments.
+- ARM-based server research or educational deployments.
+
+---
+
+## Community & Development
+
+Join our active developer and player community on Discord:  
+[https://discord.gg/fxWv9hG3uv](https://discord.gg/fxWv9hG3uv)
+
+CinderMC is open to **modders, contributors, and ARM enthusiasts**. All performance patches and enhancements are welcome to improve stability, speed, and scalability.
+
+---
+
+## License
+
+All source code, patches, and modules are **MIT licensed** 
+CinderMC leverages **Debian ARM libraries** where applicable; all proprietary code is original and fully isolated.
