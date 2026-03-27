@@ -1,0 +1,219 @@
+# =============================================================================
+# Cinder OS — cinder.service
+# systemd unit for Cinder Core (compute node)
+#
+# Install path:  /etc/systemd/system/cinder.service
+# Enable:        systemctl enable cinder
+# Start:         systemctl start cinder
+# Stop:          systemctl stop cinder   (triggers clean server shutdown)
+# Status:        systemctl status cinder
+# Logs:          journalctl -u cinder -f
+#
+# Dependencies:
+#   - Requires network-online.target: Cinder needs a live network interface
+#     before binding its player connection port and contacting the control node.
+#   - Requires local-fs.target: world data and log directories must be mounted.
+#   - Wants time-sync.target: chunk timestamps and backup filenames depend
+#     on a correct system clock. Failure here is non-fatal (Want, not Require).
+#
+# Watchdog integration:
+#   systemd's built-in watchdog is enabled (WatchdogSec=90s). Cinder Core
+#   must call sd_notify(WATCHDOG=1) at intervals shorter than WatchdogSec/2
+#   to satisfy the watchdog. If Cinder Core hangs (tick thread deadlock,
+#   OOM-induced freeze), systemd will kill and restart it automatically.
+#
+#   The CinderWatchdogNotifier class (cinder-core) calls sd_notify via
+#   the Java process reaper on a 30-second interval during healthy operation.
+#
+# Shutdown behaviour:
+#   On systemctl stop, systemd sends SIGTERM to the launch.sh process.
+#   launch.sh's signal handler forwards SIGTERM to the JVM, which triggers
+#   Cinder Core's shutdown hook (saves world, flushes logs, closes sockets).
+#   TimeoutStopSec=90s gives the server up to 90 seconds to complete a clean
+#   shutdown before systemd sends SIGKILL. This is generous enough for a
+#   full world save on microSD.
+#
+# Security hardening:
+#   This unit runs as the unprivileged 'cinder' user (UID 1001).
+#   Capabilities are stripped. The systemd security directives below
+#   provide a reasonable hardening baseline for a hosting service:
+#   - NoNewPrivileges: the JVM cannot escalate via setuid binaries
+#   - PrivateTmp: isolated /tmp
+#   - ProtectSystem=strict: /usr, /boot, /etc are read-only (world data
+#     lives under /opt/cinder which is explicitly ReadWritePaths)
+#   - ProtectHome=true: no access to /home or /root
+#   - RestrictAddressFamilies: only AF_INET, AF_INET6, AF_UNIX needed
+#
+# Journal integration:
+#   StandardOutput and StandardError are directed to the journal.
+#   Log lines from Cinder Core's java.util.logging handlers appear in
+#   journalctl with the cinder unit identifier. Structured fields
+#   (TPS, MSPT, tick number) are emitted as SYSLOG_IDENTIFIER=cinder-core.
+#
+# Overrides:
+#   To change the preset or heap without editing this file, use a drop-in:
+#     mkdir -p /etc/systemd/system/cinder.service.d/
+#     cat > /etc/systemd/system/cinder.service.d/override.conf <<EOF
+#     [Service]
+#     Environment=CINDER_PRESET=event
+#     Environment=CINDER_HEAP_MAX=3g
+#     EOF
+#     systemctl daemon-reload && systemctl restart cinder
+#
+# =============================================================================
+
+[Unit]
+Description=Cinder Core — Minecraft Hosting Runtime
+Documentation=https://github.com/cinder-project/cinder
+After=network-online.target local-fs.target
+Wants=network-online.target time-sync.target
+Requires=local-fs.target
+
+# If Cinder Control is running on the same node, start after it
+# so the monitoring socket is available before the server emits metrics.
+# Comment out this line on dedicated compute-only nodes.
+After=cinder-control.service
+Wants=cinder-control.service
+
+[Service]
+# ── Identity ───────────────────────────────────────────────────────────────
+
+Type=simple
+User=cinder
+Group=cinder
+
+# Working directory: all relative paths in launch.sh resolve from here.
+WorkingDirectory=/opt/cinder
+
+# ── Environment ────────────────────────────────────────────────────────────
+
+# Default preset. Override via drop-in (see header comments).
+Environment=CINDER_PRESET=survival
+Environment=CINDER_BASE_DIR=/opt/cinder
+Environment=CINDER_LOG_DIR=/opt/cinder/logs
+Environment=CINDER_WORLD_DIR=/opt/cinder/world
+Environment=CINDER_JAR=/opt/cinder/cinder-core/build/libs/cinder-core.jar
+Environment=CINDER_PRESET_DIR=/opt/cinder/cinder-runtime/presets
+
+# Java home: point explicitly to the ARM64 JRE to avoid ambiguity if
+# multiple JDKs are installed.
+Environment=JAVA_HOME=/usr/lib/jvm/java-21-openjdk-arm64
+Environment=PATH=/usr/lib/jvm/java-21-openjdk-arm64/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+
+# ── Launch command ─────────────────────────────────────────────────────────
+
+# launch.sh is the primary entrypoint. It handles preset loading, JVM flag
+# assembly, CPU affinity (taskset), process priority (nice/ionice), log
+# rotation, and the watchdog restart loop.
+#
+# --no-watchdog is passed here because systemd provides the outer restart
+# loop via Restart=on-failure. launch.sh's internal watchdog would add a
+# redundant and potentially conflicting restart layer.
+ExecStart=/opt/cinder/cinder-runtime/launch/launch.sh \
+    --preset ${CINDER_PRESET} \
+    --no-watchdog
+
+# Pre-start: verify the environment is ready before attempting to launch.
+# This runs as root briefly to check disk space and set the CPU governor.
+ExecStartPre=/opt/cinder/scripts/prestart-check.sh
+
+# Stop: send SIGTERM to the launch.sh process group, which propagates to
+# the JVM. The JVM's shutdown hook handles clean world save.
+ExecStop=/bin/kill -TERM $MAINPID
+KillMode=process
+KillSignal=SIGTERM
+SendSIGKILL=yes
+
+# ── Restart policy ─────────────────────────────────────────────────────────
+
+# Restart on crash (non-zero exit), but not on clean stop (exit 0)
+# or operator-initiated stops (exit 3, from launch.sh SIGTERM handler).
+Restart=on-failure
+RestartSec=15s
+
+# Limit restart attempts: if Cinder Core crashes more than 5 times in
+# 10 minutes, systemd marks the unit as failed and stops trying.
+# This prevents a rapid crash loop from hammering the SD card.
+StartLimitIntervalSec=600
+StartLimitBurst=5
+
+# ── Timeouts ───────────────────────────────────────────────────────────────
+
+# Allow up to 60 seconds for the JVM to start and reach the tick loop.
+# On Pi 4 with microSD, cold JVM startup (class loading + world open) can
+# take 20-40 seconds.
+TimeoutStartSec=60s
+
+# Allow up to 90 seconds for a clean shutdown (world save + socket close).
+# On Pi 4 microSD with a large dirty chunk set, saves can take 30-60s.
+TimeoutStopSec=90s
+
+# ── systemd Watchdog ───────────────────────────────────────────────────────
+
+# systemd will kill and restart the service if it does not receive a
+# sd_notify(WATCHDOG=1) within this interval. Cinder Core notifies every
+# 30 seconds during healthy operation.
+WatchdogSec=90s
+
+# If the watchdog fires, treat it as a crash and restart.
+NotifyAccess=main
+
+# ── Logging ────────────────────────────────────────────────────────────────
+
+# Direct stdout/stderr to the journal. Cinder Core's java.util.logging
+# writes to stdout; structured metrics lines are parseable by journalctl.
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=cinder-core
+
+# ── Resource limits ────────────────────────────────────────────────────────
+
+# File descriptor limit: Minecraft connections + chunk file handles.
+# 8192 is generous for Pi 4; reduce if system-wide fd limits are tight.
+LimitNOFILE=8192
+
+# Disable core dumps in production to avoid filling the SD card on OOM crash.
+LimitCORE=0
+
+# Nice value: -5 (higher priority than normal user processes).
+# taskset handles CPU affinity inside launch.sh.
+Nice=-5
+
+# IO scheduling: best-effort class, priority 2.
+# Gives Cinder IO priority over background tasks without starving the OS.
+IOSchedulingClass=best-effort
+IOSchedulingPriority=2
+
+# ── Security hardening ─────────────────────────────────────────────────────
+
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+
+# Explicitly grant write access to Cinder's data directories.
+ReadWritePaths=/opt/cinder/world
+ReadWritePaths=/opt/cinder/logs
+ReadWritePaths=/opt/cinder/backups
+ReadWritePaths=/opt/cinder/staging
+
+# USB import staging directory: writable so usb-import.sh can deposit files.
+ReadWritePaths=/opt/cinder/staging
+
+# Allow read access to config and preset files.
+ReadOnlyPaths=/opt/cinder/cinder-runtime/presets
+ReadOnlyPaths=/opt/cinder/scripts
+
+# Network: only IPv4, IPv6, and Unix sockets needed.
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+
+# Prevent the JVM from acquiring unusual capabilities.
+CapabilityBoundingSet=
+AmbientCapabilities=
+
+[Install]
+WantedBy=multi-user.target
+
