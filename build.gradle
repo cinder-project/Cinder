@@ -1,0 +1,87 @@
+plugins {
+    id 'java'
+}
+
+group   = 'dev.cinder'
+version = System.getenv('CINDER_VERSION') ?: 'dev'
+
+java {
+    toolchain {
+        languageVersion = JavaLanguageVersion.of(21)
+    }
+}
+
+repositories {
+    mavenCentral()
+}
+
+dependencies {
+    testImplementation platform('org.junit:junit-bom:5.11.3')
+    testImplementation 'org.junit.jupiter:junit-jupiter'
+    testRuntimeOnly     'org.junit.platform:junit-platform-launcher'
+}
+
+compileJava.options.encoding   = 'UTF-8'
+compileTestJava.options.encoding = 'UTF-8'
+
+tasks.named('test') {
+    useJUnitPlatform()
+
+    jvmArgs(
+        '--add-opens', 'java.base/java.lang=ALL-UNNAMED'
+    )
+
+    testLogging {
+        events 'passed', 'skipped', 'failed'
+        exceptionFormat 'full'
+        showStandardStreams false
+    }
+
+    reports {
+        html.required = true
+        junitXml.required = true
+    }
+}
+
+tasks.named('jar') {
+    archiveFileName = "cinder-${version}.jar"
+
+    manifest {
+        attributes(
+            'Main-Class'       : 'dev.cinder.server.CinderServer',
+            'Implementation-Title'  : 'Cinder',
+            'Implementation-Version': version,
+            'Built-JDK'        : System.getProperty('java.version')
+        )
+    }
+}
+
+tasks.register('fatJar', Jar) {
+    group       = 'build'
+    description = 'Assembles a self-contained executable JAR with all dependencies.'
+
+    archiveFileName = "cinder-${version}-all.jar"
+    duplicatesStrategy = DuplicatesStrategy.EXCLUDE
+
+    manifest {
+        attributes(
+            'Main-Class'       : 'dev.cinder.server.CinderServer',
+            'Implementation-Title'  : 'Cinder',
+            'Implementation-Version': version
+        )
+    }
+
+    from sourceSets.main.output
+    dependsOn configurations.runtimeClasspath
+    from {
+        configurations.runtimeClasspath.collect {
+            it.isDirectory() ? it : zipTree(it)
+        }
+    }
+}
+
+assemble.dependsOn fatJar
+
+tasks.register('printVersion') {
+    doLast { println version }
+}
