@@ -239,7 +239,7 @@ public final class CinderTickLoop implements Runnable {
      * as many state changes as possible into one packet window.
      */
     private void runTick(long tick) {
-        TickSnapshot snap = profiler.beginTick(tick);
+        TickSnapshot.Builder snap = profiler.beginTick(tick);
 
         // ── Phase 1: Pre-tick ───────────────────────────────────────────
         snap.markPhaseStart(TickSnapshot.Phase.PRE);
