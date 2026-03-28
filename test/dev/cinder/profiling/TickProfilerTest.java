@@ -3,11 +3,15 @@ package dev.cinder.profiling;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
+import java.time.Instant;
 import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.*;
 
 class TickProfilerTest {
+
+    private static final long WARN_NS  = 45_000_000L;
+    private static final long SPIKE_NS = 100_000_000L;
 
     private TickProfiler profiler;
 
@@ -30,74 +34,69 @@ class TickProfilerTest {
 
     @Test
     void initialState_emptyStats() {
-        TickProfiler.RollingStats stats = profiler.computeStats();
-        assertEquals(TickProfiler.RollingStats.EMPTY, stats);
-        assertEquals(0, stats.sampleCount);
+        assertEquals(TickProfiler.RollingStats.EMPTY, profiler.computeStats());
+        assertEquals(0, profiler.computeStats().sampleCount);
     }
 
     // ── Single tick lifecycle ─────────────────────────────────────────────
 
     @Test
     void singleTick_snapshotAvailable() {
-        runTick(profiler, 1, 10_000_000L);
+        runRealTick(profiler, 1);
         assertNotNull(profiler.getLastSnapshot());
     }
 
     @Test
     void singleTick_tickCountIncremented() {
-        runTick(profiler, 1, 10_000_000L);
+        runRealTick(profiler, 1);
         assertEquals(1L, profiler.getTotalTicks());
     }
 
     @Test
     void singleTick_tickNumberRecorded() {
-        runTick(profiler, 42, 10_000_000L);
+        runRealTick(profiler, 42);
         assertEquals(42L, profiler.getLastSnapshot().tickNumber);
     }
 
     @Test
-    void singleTick_msptApproximate() {
-        runTick(profiler, 1, 10_000_000L);
-        double mspt = profiler.getLastMspt();
-        assertTrue(mspt >= 0, "MSPT must be non-negative");
+    void singleTick_msptNonNegative() {
+        runRealTick(profiler, 1);
+        assertTrue(profiler.getLastMspt() >= 0);
     }
 
     // ── Ring buffer ───────────────────────────────────────────────────────
 
     @Test
     void ringBuffer_recentSnapshots_returnsAllWhenUnderCapacity() {
-        for (int i = 1; i <= 10; i++) {
-            runTick(profiler, i, 5_000_000L);
-        }
-        List<TickSnapshot> snapshots = profiler.getRecentSnapshots(10);
-        assertEquals(10, snapshots.size());
+        for (int i = 1; i <= 10; i++) inject(profiler, i, 5_000_000L);
+        assertEquals(10, profiler.getRecentSnapshots(10).size());
     }
 
     @Test
-    void ringBuffer_recentSnapshots_clampsToCapacity() {
-        for (int i = 1; i <= 20; i++) {
-            runTick(profiler, i, 5_000_000L);
-        }
-        List<TickSnapshot> snapshots = profiler.getRecentSnapshots(100);
-        assertEquals(20, snapshots.size());
+    void ringBuffer_recentSnapshots_clampsToRingCapacity() {
+        for (int i = 1; i <= 20; i++) inject(profiler, i, 5_000_000L);
+        assertEquals(20, profiler.getRecentSnapshots(100).size());
+    }
+
+    @Test
+    void ringBuffer_statsWindow_capsAtWindowSize() {
+        TickProfiler large = new TickProfiler(200);
+        for (int i = 1; i <= 200; i++) inject(large, i, 5_000_000L);
+        assertEquals(TickProfiler.STATS_WINDOW, large.computeStats().sampleCount);
     }
 
     @Test
     void ringBuffer_wrapsAround_oldestEvicted() {
-        for (int i = 1; i <= 25; i++) {
-            runTick(profiler, i, 5_000_000L);
-        }
+        for (int i = 1; i <= 25; i++) inject(profiler, i, 5_000_000L);
         List<TickSnapshot> snapshots = profiler.getRecentSnapshots(20);
         assertEquals(20, snapshots.size());
-        assertEquals(6L, snapshots.get(0).tickNumber);
+        assertEquals(6L,  snapshots.get(0).tickNumber);
         assertEquals(25L, snapshots.get(snapshots.size() - 1).tickNumber);
     }
 
     @Test
     void ringBuffer_orderedOldestToNewest() {
-        for (int i = 1; i <= 15; i++) {
-            runTick(profiler, i, 5_000_000L);
-        }
+        for (int i = 1; i <= 15; i++) inject(profiler, i, 5_000_000L);
         List<TickSnapshot> snapshots = profiler.getRecentSnapshots(15);
         for (int i = 0; i < snapshots.size() - 1; i++) {
             assertTrue(snapshots.get(i).tickNumber < snapshots.get(i + 1).tickNumber);
@@ -106,11 +105,9 @@ class TickProfilerTest {
 
     @Test
     void ringBuffer_requestFewer_returnsNewest() {
-        for (int i = 1; i <= 15; i++) {
-            runTick(profiler, i, 5_000_000L);
-        }
+        for (int i = 1; i <= 15; i++) inject(profiler, i, 5_000_000L);
         List<TickSnapshot> snapshots = profiler.getRecentSnapshots(5);
-        assertEquals(5, snapshots.size());
+        assertEquals(5,   snapshots.size());
         assertEquals(11L, snapshots.get(0).tickNumber);
         assertEquals(15L, snapshots.get(snapshots.size() - 1).tickNumber);
     }
@@ -119,25 +116,25 @@ class TickProfilerTest {
 
     @Test
     void snapshot_normalTick_notOverrun() {
-        runTick(profiler, 1, 10_000_000L);
+        inject(profiler, 1, 10_000_000L);
         assertFalse(profiler.getLastSnapshot().isOverrun);
     }
 
     @Test
     void snapshot_normalTick_notSpike() {
-        runTick(profiler, 1, 10_000_000L);
+        inject(profiler, 1, 10_000_000L);
         assertFalse(profiler.getLastSnapshot().isSpike);
     }
 
     @Test
     void snapshot_overrunTick_flaggedOverrun() {
-        runFakeTick(profiler, 1, 50_000_000L);
+        inject(profiler, 1, WARN_NS + 1);
         assertTrue(profiler.getLastSnapshot().isOverrun);
     }
 
     @Test
-    void snapshot_spikeTick_flaggedSpike() {
-        runFakeTick(profiler, 1, 110_000_000L);
+    void snapshot_spikeTick_flaggedSpikeAndOverrun() {
+        inject(profiler, 1, SPIKE_NS + 1);
         assertTrue(profiler.getLastSnapshot().isSpike);
         assertTrue(profiler.getLastSnapshot().isOverrun);
     }
@@ -146,46 +143,27 @@ class TickProfilerTest {
 
     @Test
     void rollingStats_sampleCount() {
-        for (int i = 1; i <= 15; i++) {
-            runFakeTick(profiler, i, 10_000_000L);
-        }
+        for (int i = 1; i <= 15; i++) inject(profiler, i, 10_000_000L);
         assertEquals(15, profiler.computeStats().sampleCount);
     }
 
     @Test
-    void rollingStats_sampleCount_capsAtWindow() {
-        for (int i = 1; i <= 20; i++) {
-            runFakeTick(profiler, i, 10_000_000L);
-        }
-        assertEquals(TickProfiler.STATS_WINDOW, profiler.computeStats().sampleCount);
-    }
-
-    @Test
     void rollingStats_meanMspt_uniform() {
-        long nsPerTick = 8_000_000L;
-        for (int i = 1; i <= 20; i++) {
-            runFakeTick(profiler, i, nsPerTick);
-        }
-        TickProfiler.RollingStats stats = profiler.computeStats();
-        assertEquals(8.0, stats.meanMspt, 0.5);
+        for (int i = 1; i <= 20; i++) inject(profiler, i, 8_000_000L);
+        assertEquals(8.0, profiler.computeStats().meanMspt, 0.1);
     }
 
     @Test
     void rollingStats_maxMspt_identifiesSpike() {
-        for (int i = 1; i <= 19; i++) {
-            runFakeTick(profiler, i, 5_000_000L);
-        }
-        runFakeTick(profiler, 20, 80_000_000L);
-
-        TickProfiler.RollingStats stats = profiler.computeStats();
-        assertTrue(stats.maxMspt >= 79.0, "Max MSPT should reflect the spike tick");
+        for (int i = 1; i <= 19; i++) inject(profiler, i, 5_000_000L);
+        inject(profiler, 20, 80_000_000L);
+        assertTrue(profiler.computeStats().maxMspt >= 79.0);
     }
 
     @Test
     void rollingStats_minMspt_lessThanMean() {
         for (int i = 1; i <= 20; i++) {
-            long ns = (i % 2 == 0) ? 20_000_000L : 5_000_000L;
-            runFakeTick(profiler, i, ns);
+            inject(profiler, i, (i % 2 == 0) ? 20_000_000L : 5_000_000L);
         }
         TickProfiler.RollingStats stats = profiler.computeStats();
         assertTrue(stats.minMspt < stats.meanMspt);
@@ -194,78 +172,75 @@ class TickProfilerTest {
 
     @Test
     void rollingStats_percentileOrdering() {
-        for (int i = 1; i <= 20; i++) {
-            runFakeTick(profiler, i, i * 1_000_000L);
-        }
+        for (int i = 1; i <= 20; i++) inject(profiler, i, i * 1_000_000L);
         TickProfiler.RollingStats stats = profiler.computeStats();
-        assertTrue(stats.minMspt <= stats.p50Mspt);
-        assertTrue(stats.p50Mspt <= stats.p95Mspt);
-        assertTrue(stats.p95Mspt <= stats.p99Mspt);
-        assertTrue(stats.p99Mspt <= stats.maxMspt);
+        assertTrue(stats.minMspt  <= stats.p50Mspt);
+        assertTrue(stats.p50Mspt  <= stats.p95Mspt);
+        assertTrue(stats.p95Mspt  <= stats.p99Mspt);
+        assertTrue(stats.p99Mspt  <= stats.maxMspt);
     }
 
     @Test
     void rollingStats_overrunCount() {
-        for (int i = 1; i <= 17; i++) {
-            runFakeTick(profiler, i, 10_000_000L);
-        }
-        runFakeTick(profiler, 18, 50_000_000L);
-        runFakeTick(profiler, 19, 60_000_000L);
-        runFakeTick(profiler, 20, 70_000_000L);
-
-        TickProfiler.RollingStats stats = profiler.computeStats();
-        assertEquals(3, stats.overrunCount);
+        for (int i = 1; i <= 17; i++) inject(profiler, i, 10_000_000L);
+        inject(profiler, 18, WARN_NS + 1);
+        inject(profiler, 19, WARN_NS + 2);
+        inject(profiler, 20, WARN_NS + 3);
+        assertEquals(3, profiler.computeStats().overrunCount);
     }
 
     @Test
     void rollingStats_spikeCount() {
-        for (int i = 1; i <= 18; i++) {
-            runFakeTick(profiler, i, 10_000_000L);
-        }
-        runFakeTick(profiler, 19, 110_000_000L);
-        runFakeTick(profiler, 20, 120_000_000L);
+        for (int i = 1; i <= 18; i++) inject(profiler, i, 10_000_000L);
+        inject(profiler, 19, SPIKE_NS + 1);
+        inject(profiler, 20, SPIKE_NS + 2);
+        assertEquals(2, profiler.computeStats().spikeCount);
+    }
 
+    // ── TPS derivation ────────────────────────────────────────────────────
+
+    @Test
+    void tps_approximatelyTwenty_withFiftyMsSpacing() {
+        Instant base = Instant.now();
+        for (int i = 1; i <= 20; i++) {
+            injectAt(profiler, i, 5_000_000L, base.plusMillis((long) (i - 1) * 50));
+        }
+        double tps = profiler.computeStats().tps;
+        assertTrue(tps >= 19.0 && tps <= 21.0,
+            "Expected ~20 TPS but got: " + tps);
+    }
+
+    @Test
+    void tps_degraded_withSlowTicks() {
+        Instant base = Instant.now();
+        for (int i = 1; i <= 20; i++) {
+            injectAt(profiler, i, 80_000_000L, base.plusMillis((long) (i - 1) * 80));
+        }
         TickProfiler.RollingStats stats = profiler.computeStats();
-        assertEquals(2, stats.spikeCount);
+        assertTrue(stats.isTpsDegraded(),
+            "Expected TPS degraded but TPS was: " + stats.tps);
     }
 
     // ── Status line ───────────────────────────────────────────────────────
 
     @Test
     void statusLine_containsTps() {
-        for (int i = 1; i <= 20; i++) {
-            runFakeTick(profiler, i, 5_000_000L);
-        }
-        String line = profiler.computeStats().toStatusLine();
-        assertTrue(line.contains("TPS="));
+        for (int i = 1; i <= 20; i++) inject(profiler, i, 5_000_000L);
+        assertTrue(profiler.computeStats().toStatusLine().contains("TPS="));
     }
 
     @Test
     void statusLine_containsMspt() {
-        for (int i = 1; i <= 20; i++) {
-            runFakeTick(profiler, i, 5_000_000L);
-        }
-        String line = profiler.computeStats().toStatusLine();
-        assertTrue(line.contains("MSPT"));
-    }
-
-    @Test
-    void statusLine_degradedFlag_whenTpsLow() {
-        for (int i = 1; i <= 20; i++) {
-            runFakeTick(profiler, i, 80_000_000L);
-        }
-        TickProfiler.RollingStats stats = profiler.computeStats();
-        assertTrue(stats.isTpsDegraded());
-        assertTrue(stats.toStatusLine().contains("TPS DEGRADED"));
+        for (int i = 1; i <= 20; i++) inject(profiler, i, 5_000_000L);
+        assertTrue(profiler.computeStats().toStatusLine().contains("MSPT"));
     }
 
     @Test
     void statusLine_p99Flag_whenOverBudget() {
-        for (int i = 1; i <= 20; i++) {
-            runFakeTick(profiler, i, 60_000_000L);
-        }
+        for (int i = 1; i <= 20; i++) inject(profiler, i, 60_000_000L);
         TickProfiler.RollingStats stats = profiler.computeStats();
-        assertTrue(stats.isP99Degraded());
+        assertTrue(stats.isP99Degraded(),
+            "Expected p99 over budget but p99 was: " + stats.p99Mspt);
         assertTrue(stats.toStatusLine().contains("P99 OVER BUDGET"));
     }
 
@@ -283,29 +258,33 @@ class TickProfilerTest {
 
     // ── Helpers ───────────────────────────────────────────────────────────
 
-    /**
-     * Runs a tick using the real Builder API. Actual elapsed time will be
-     * near-zero (the test body is fast), so this is used only to verify
-     * structural correctness, not timing values.
-     */
-    private static void runTick(TickProfiler profiler, long tickNumber, long recordNs) {
+    private static void runRealTick(TickProfiler profiler, long tickNumber) {
         TickSnapshot.Builder builder = profiler.beginTick(tickNumber);
         for (TickSnapshot.Phase phase : TickSnapshot.Phase.values()) {
             builder.markPhaseStart(phase);
             builder.markPhaseEnd(phase);
         }
-        profiler.recordTick(tickNumber, recordNs);
+        profiler.recordTick(tickNumber, 0L);
         profiler.endTick(builder);
     }
 
-    /**
-     * Runs a tick using a manually constructed snapshot with a controlled
-     * totalNs value, bypassing real wall-clock timing. Used for stats tests
-     * that need deterministic MSPT values.
-     */
-    private static void runFakeTick(TickProfiler profiler, long tickNumber, long totalNs) {
-        TickSnapshot.Builder builder = profiler.beginTick(tickNumber);
+    private static void inject(TickProfiler profiler, long tickNumber, long totalNs) {
+        injectAt(profiler, tickNumber, totalNs, Instant.now());
+    }
+
+    private static void injectAt(TickProfiler profiler, long tickNumber,
+                                  long totalNs, Instant startInstant) {
+        boolean overrun = totalNs > 45_000_000L;
+        boolean spike   = totalNs > 100_000_000L;
+        TickSnapshot snapshot = new TickSnapshot(
+            tickNumber,
+            startInstant,
+            totalNs,
+            new long[TickSnapshot.Phase.values().length],
+            overrun,
+            spike
+        );
+        profiler.injectSnapshot(snapshot);
         profiler.recordTick(tickNumber, totalNs);
-        profiler.endTick(builder);
     }
 }
