@@ -3,7 +3,6 @@ name: CI
 on:
   push:
     branches: [ main ]
-    tags:     [ 'v*' ]
   pull_request:
     branches: [ main ]
 
@@ -23,9 +22,14 @@ jobs:
     name: Build & Test
     runs-on: ubuntu-latest
 
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: Set up JDK ${{ env.JAVA_VERSION }}
         uses: actions/setup-java@v4
@@ -34,22 +38,32 @@ jobs:
           distribution: temurin
           cache: gradle
 
-      - name: Bootstrap Gradle wrapper
+      - name: Bootstrap Gradle
         uses: gradle/actions/setup-gradle@v3
         with:
           gradle-version: ${{ env.GRADLE_VERSION }}
 
-      - name: Set version
+      - name: Derive version
         id: version
         run: |
-          if [[ "${GITHUB_REF}" == refs/tags/v* ]]; then
-            VERSION="${GITHUB_REF#refs/tags/v}"
+          git fetch --tags --quiet
+
+          LATEST=$(git tag --list 'v*' --sort=-version:refname | head -1)
+
+          if [ -z "$LATEST" ]; then
+            NEXT="0.1.0"
           else
-            SHORT_SHA=$(git rev-parse --short HEAD)
-            VERSION="0.0.0-dev+${SHORT_SHA}"
+            CURRENT="${LATEST#v}"
+            MAJOR=$(echo "$CURRENT" | cut -d. -f1)
+            MINOR=$(echo "$CURRENT" | cut -d. -f2)
+            PATCH=$(echo "$CURRENT" | cut -d. -f3)
+            NEXT="${MAJOR}.${MINOR}.$((PATCH + 1))"
           fi
-          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
-          echo "CINDER_VERSION=${VERSION}" >> "$GITHUB_ENV"
+
+          SHORT_SHA=$(git rev-parse --short HEAD)
+          echo "version=${NEXT}" >> "$GITHUB_OUTPUT"
+          echo "CINDER_VERSION=${NEXT}" >> "$GITHUB_ENV"
+          echo "Derived version: ${NEXT} (from ${LATEST:-none}, sha=${SHORT_SHA})"
 
       - name: Build
         run: gradle assemble --no-daemon
@@ -69,8 +83,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: cinder-jars-${{ steps.version.outputs.version }}
-          path: |
-            build/libs/cinder-*.jar
+          path: build/libs/cinder-*.jar
           retention-days: 30
 
   # ── ARM64 cross-compile verification ─────────────────────────────────────
@@ -90,35 +103,31 @@ jobs:
           distribution: temurin
           cache: gradle
 
-      - name: Bootstrap Gradle wrapper
+      - name: Bootstrap Gradle
         uses: gradle/actions/setup-gradle@v3
         with:
           gradle-version: ${{ env.GRADLE_VERSION }}
 
       - name: Compile for ARM64 target
-        run: |
-          gradle compileJava \
-            --no-daemon \
-            -Porg.gradle.java.home="$JAVA_HOME"
+        run: gradle compileJava --no-daemon
         env:
           JAVA_TOOL_OPTIONS: "-XX:+UseSerialGC"
+          CINDER_VERSION: ${{ needs.build.outputs.version }}
 
-      - name: Verify class file targets
+      - name: Verify class file target
         run: |
           CLASS=$(find build/classes -name "CinderServer.class" | head -1)
-          if [ -z "$CLASS" ]; then
-            echo "CinderServer.class not found" && exit 1
-          fi
+          [ -z "$CLASS" ] && echo "CinderServer.class not found" && exit 1
           MAJOR=$(javap -verbose "$CLASS" | grep "major version" | awk '{print $NF}')
           echo "Class file major version: $MAJOR"
-          [ "$MAJOR" = "65" ] && echo "Java 21 target confirmed." || (echo "Unexpected version $MAJOR" && exit 1)
+          [ "$MAJOR" = "65" ] && echo "Java 21 confirmed." || (echo "Unexpected: $MAJOR" && exit 1)
 
   # ── Release ───────────────────────────────────────────────────────────────
   release:
     name: Release
     runs-on: ubuntu-latest
     needs: [ build, build-arm64 ]
-    if: startsWith(github.ref, 'refs/tags/v')
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
 
     permissions:
       contents: write
@@ -126,6 +135,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: Set up JDK ${{ env.JAVA_VERSION }}
         uses: actions/setup-java@v4
@@ -134,19 +145,15 @@ jobs:
           distribution: temurin
           cache: gradle
 
-      - name: Set version from tag
-        run: |
-          VERSION="${GITHUB_REF#refs/tags/v}"
-          echo "CINDER_VERSION=${VERSION}" >> "$GITHUB_ENV"
-          echo "VERSION=${VERSION}" >> "$GITHUB_ENV"
-
-      - name: Bootstrap Gradle wrapper
+      - name: Bootstrap Gradle
         uses: gradle/actions/setup-gradle@v3
         with:
           gradle-version: ${{ env.GRADLE_VERSION }}
 
       - name: Build release JARs
         run: gradle assemble --no-daemon
+        env:
+          CINDER_VERSION: ${{ needs.build.outputs.version }}
 
       - name: Generate checksums
         run: |
@@ -154,22 +161,27 @@ jobs:
           sha256sum cinder-*.jar > SHA256SUMS
           cat SHA256SUMS
 
-      - name: Extract release notes
-        id: notes
+      - name: Tag and release
+        env:
+          VERSION: ${{ needs.build.outputs.version }}
+          GH_TOKEN: ${{ github.token }}
         run: |
-          TAG="${GITHUB_REF#refs/tags/}"
-          NOTES=$(awk "/^## ${TAG}/{flag=1; next} /^## v/{flag=0} flag" CHANGELOG.md 2>/dev/null || echo "Release ${TAG}")
-          echo "notes<<EOF" >> "$GITHUB_OUTPUT"
-          echo "$NOTES"     >> "$GITHUB_OUTPUT"
-          echo "EOF"        >> "$GITHUB_OUTPUT"
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
 
-      - name: Create GitHub release
-        uses: softprops/action-gh-release@v2
-        with:
-          name: "Cinder ${{ env.VERSION }}"
-          body: ${{ steps.notes.outputs.notes }}
-          draft: false
-          prerelease: ${{ contains(env.VERSION, '-') }}
-          files: |
-            build/libs/cinder-${{ env.VERSION }}-all.jar
-            build/libs/SHA256SUMS
+          TAG="v${VERSION}"
+
+          if git rev-parse "$TAG" >/dev/null 2>&1; then
+            echo "Tag $TAG already exists — skipping release."
+            exit 0
+          fi
+
+          git tag "$TAG"
+          git push origin "$TAG"
+
+          gh release create "$TAG" \
+            build/libs/cinder-${VERSION}-all.jar \
+            build/libs/SHA256SUMS \
+            --title "Cinder ${VERSION}" \
+            --notes "Build from commit \`$(git rev-parse --short HEAD)\` on \`main\`." \
+            --latest
