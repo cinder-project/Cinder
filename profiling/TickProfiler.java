@@ -179,6 +179,12 @@ public final class TickProfiler {
         ring[slot] = snapshot;
     }
 
+    void injectSnapshot(TickSnapshot snapshot) {
+        writeToRing(snapshot);
+        lastSnapshot.set(snapshot);
+        totalTicks.incrementAndGet();
+    }
+
     // ── Read API (any thread) ─────────────────────────────────────────────
 
     /**
