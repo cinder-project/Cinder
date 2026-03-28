@@ -18,7 +18,8 @@ sourceSets {
                 'server',
                 'entity',
                 'chunk',
-                'profiling'
+                'profiling',
+                'world'
             ]
         }
     }
