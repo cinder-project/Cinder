@@ -19,7 +19,8 @@ sourceSets {
                 'entity',
                 'chunk',
                 'profiling',
-                'world'
+                'world',
+                'network',
             ]
         }
     }
