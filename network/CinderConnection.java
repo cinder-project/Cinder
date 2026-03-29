@@ -272,21 +272,21 @@ public final class CinderConnection {
         return tryConsumeMinecraftPacket(packetBuf -> {
             // Decoded packet dispatched to tick thread via submitSync.
             // Packet codec will parse fields; for now log and advance state.
-            scheduler.submitSync(() -> handleHandshakePacket(packetBuf.duplicate()));
+            scheduler.submitSync("net:handshake:" + remoteAddress, () -> handleHandshakePacket(packetBuf.duplicate()));
             packetsDecoded++;
         });
     }
 
     private boolean tryConsumeLogin() {
         return tryConsumeMinecraftPacket(packetBuf -> {
-            scheduler.submitSync(() -> handleLoginPacket(packetBuf.duplicate()));
+            scheduler.submitSync("net:login:" + remoteAddress, () -> handleLoginPacket(packetBuf.duplicate()));
             packetsDecoded++;
         });
     }
 
     private boolean tryConsumePlay() {
         return tryConsumeMinecraftPacket(packetBuf -> {
-            scheduler.submitSync(() -> handlePlayPacket(packetBuf.duplicate()));
+            scheduler.submitSync("net:play:" + playerName, () -> handlePlayPacket(packetBuf.duplicate()));
             packetsDecoded++;
         });
     }
