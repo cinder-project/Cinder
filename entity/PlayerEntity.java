@@ -305,7 +305,7 @@ public final class PlayerEntity extends CinderEntity {
      * Return all chunk positions within {@code radius} chunks of {@code center}.
      * Produces a (2*radius+1)² square — matches vanilla client behaviour.
      */
-    static Set<ChunkPosition> chunksInView(ChunkPosition center, int radius) {
+    public static Set<ChunkPosition> chunksInView(ChunkPosition center, int radius) {
         Set<ChunkPosition> result = new HashSet<>((2 * radius + 1) * (2 * radius + 1));
         for (int dx = -radius; dx <= radius; dx++) {
             for (int dz = -radius; dz <= radius; dz++) {
