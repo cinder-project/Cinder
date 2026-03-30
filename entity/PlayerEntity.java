@@ -2,6 +2,7 @@ package dev.cinder.entity;
 
 import dev.cinder.chunk.ChunkLifecycleManager;
 import dev.cinder.chunk.ChunkPosition;
+import dev.cinder.entity.EntityUpdatePipeline.EntityTier;
 import dev.cinder.network.CinderConnection;
 import dev.cinder.network.PacketCodec;
 import dev.cinder.network.PacketCodec.InboundAction;
@@ -142,7 +143,7 @@ public final class PlayerEntity extends CinderEntity {
         // Player crossed a chunk boundary — update view.
         updateChunkView(from);
         // Tell client where its chunk center is now.
-        connection.enqueuePacket(PacketCodec.encodeSetCenterChunk(to.x(), to.z()));
+        connection.enqueuePacket(PacketCodec.encodeSetCenterChunk(to.x, to.z));
     }
 
     // -------------------------------------------------------------------------
