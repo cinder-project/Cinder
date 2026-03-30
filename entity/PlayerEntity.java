@@ -108,6 +108,15 @@ public final class PlayerEntity extends CinderEntity {
      * Sends Login (Play) and initial position sync, loads spawn chunks.
      */
     @Override
+    /**
+     * Called by {@link dev.cinder.network.CinderConnection} on the tick thread
+     * after this entity has been registered with the entity pipeline.
+     * Bridges the package boundary since {@link #onSpawn()} is protected.
+     */
+    public void spawn() {
+        onSpawn();
+    }
+
     protected void onSpawn() {
         // Send Login (Play) to fully transition client into play state.
         ByteBuffer loginPlay = PacketCodec.encodeLoginPlay(
