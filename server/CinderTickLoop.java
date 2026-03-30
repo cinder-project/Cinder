@@ -2,6 +2,7 @@ package dev.cinder.server;
 
 import dev.cinder.chunk.ChunkLifecycleManager;
 import dev.cinder.entity.EntityUpdatePipeline;
+import dev.cinder.network.CinderNetworkManager;
 import dev.cinder.profiling.TickProfiler;
 import dev.cinder.profiling.TickSnapshot;
 
@@ -91,6 +92,8 @@ public final class CinderTickLoop implements Runnable {
     private final ChunkLifecycleManager  chunkManager;
     private final TickProfiler           profiler;
     private final CinderScheduler        scheduler;
+    // Nullable — null until CinderServer calls setNetworkManager() after construction.
+    private volatile CinderNetworkManager networkManager = null;
 
     // ── Constructor ────────────────────────────────────────────────────────
 
@@ -121,6 +124,15 @@ public final class CinderTickLoop implements Runnable {
             CinderScheduler scheduler
     ) {
         this(DEFAULT_TPS, entityPipeline, chunkManager, profiler, scheduler);
+    }
+
+    /**
+     * Wire in the network manager for POST-phase flushing.
+     * Called by {@link dev.cinder.server.CinderServer} after both subsystems
+     * are constructed. Safe to call before the tick loop starts.
+     */
+    public void setNetworkManager(CinderNetworkManager networkManager) {
+        this.networkManager = networkManager;
     }
 
     // ── Lifecycle ──────────────────────────────────────────────────────────
@@ -310,7 +322,11 @@ public final class CinderTickLoop implements Runnable {
      * than raw bandwidth.
      */
     private void runPostTick(long tick) {
-        // TODO(cinder-core): flush CinderNetworkManager outbound queues
+        // Flush all outbound network queues. All entity and world mutations for
+        // this tick are complete — batch into minimum packet windows per connection.
+        if (networkManager != null) {
+            networkManager.flushAll();
+        }
         // TODO(cinder-core): record TPS/MSPT into Cinder Control metrics
     }
 
