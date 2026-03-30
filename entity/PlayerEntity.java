@@ -107,7 +107,6 @@ public final class PlayerEntity extends CinderEntity {
      * Called by the tick thread when this entity is added to the world.
      * Sends Login (Play) and initial position sync, loads spawn chunks.
      */
-    @Override
     /**
      * Called by {@link dev.cinder.network.CinderConnection} on the tick thread
      * after this entity has been registered with the entity pipeline.
