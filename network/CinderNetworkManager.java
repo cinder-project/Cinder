@@ -1,5 +1,7 @@
 package dev.cinder.network;
 
+import dev.cinder.chunk.ChunkLifecycleManager;
+import dev.cinder.entity.EntityUpdatePipeline;
 import dev.cinder.server.CinderScheduler;
 
 import java.io.IOException;
@@ -48,6 +50,9 @@ public final class CinderNetworkManager {
     private final CinderScheduler scheduler;
     private final String bindHost;
     private final int bindPort;
+    private final EntityUpdatePipeline entityPipeline;
+    private final ChunkLifecycleManager chunkManager;
+    private final int viewDistance;
 
     private volatile boolean proxyProtocolEnabled = false;
 
@@ -69,10 +74,19 @@ public final class CinderNetworkManager {
 
     private Thread acceptThread;
 
-    public CinderNetworkManager(CinderScheduler scheduler, String bindHost, int bindPort) {
+    public CinderNetworkManager(
+            CinderScheduler scheduler,
+            String bindHost,
+            int bindPort,
+            EntityUpdatePipeline entityPipeline,
+            ChunkLifecycleManager chunkManager,
+            int viewDistance) {
         this.scheduler = scheduler;
         this.bindHost = bindHost;
         this.bindPort = bindPort;
+        this.entityPipeline = entityPipeline;
+        this.chunkManager = chunkManager;
+        this.viewDistance = viewDistance;
         // Pi 4 has 4 cores. Two write workers is enough for buffered outbound flushing
         // without starving the tick thread or the accept loop.
         this.writeExecutor = Executors.newFixedThreadPool(2, r -> {
@@ -221,7 +235,7 @@ public final class CinderNetworkManager {
 
             CinderConnection conn = new CinderConnection(
                     channel, remoteAddr, scheduler, writeExecutor, proxyProtocolEnabled,
-                    this::onConnectionClosed);
+                    this::onConnectionClosed, entityPipeline, chunkManager, viewDistance);
 
             SelectionKey key = channel.register(selector, SelectionKey.OP_READ, conn);
             conn.setSelectionKey(key);
