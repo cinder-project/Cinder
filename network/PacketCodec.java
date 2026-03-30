@@ -410,9 +410,20 @@ public final class PacketCodec {
     // -------------------------------------------------------------------------
 
     private static int requireVarInt(ByteBuffer buf, String field) throws DecodeException {
-        CinderConnection.VarIntResult r = CinderConnection.readVarInt(buf);
-        if (!r.valid) throw new DecodeException("truncated VarInt for field: " + field);
-        return r.value;
+        int value = 0, shift = 0;
+        int start = buf.position();
+        while (buf.hasRemaining()) {
+            if (shift >= 35) {
+                buf.position(start);
+                throw new DecodeException("VarInt too long for field: " + field);
+            }
+            byte b = buf.get();
+            value |= (b & 0x7F) << shift;
+            shift += 7;
+            if ((b & 0x80) == 0) return value;
+        }
+        buf.position(start);
+        throw new DecodeException("truncated VarInt for field: " + field);
     }
 
     private static String requireString(ByteBuffer buf, int maxChars, String field) throws DecodeException {
