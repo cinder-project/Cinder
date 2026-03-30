@@ -1,5 +1,9 @@
 package dev.cinder.network;
 
+import dev.cinder.chunk.ChunkLifecycleManager;
+import dev.cinder.entity.EntityUpdatePipeline;
+import dev.cinder.entity.PlayerEntity;
+import dev.cinder.network.PacketCodec.InboundAction;
 import dev.cinder.server.CinderScheduler;
 
 import java.io.IOException;
@@ -72,6 +76,9 @@ public final class CinderConnection {
     private final Executor writeExecutor;
     private final boolean proxyProtocolEnabled;
     private final Consumer<CinderConnection> closeCallback;
+    private final EntityUpdatePipeline entityPipeline;
+    private final ChunkLifecycleManager chunkManager;
+    private final int viewDistance;
 
     private SelectionKey selectionKey;
 
@@ -93,6 +100,8 @@ public final class CinderConnection {
     // Connection-level identity — set after successful LOGIN.
     private volatile String playerName = null;
     private volatile java.util.UUID playerUuid = null;
+    // Set on the tick thread after LOGIN; referenced during PLAY dispatch.
+    private volatile PlayerEntity playerEntity = null;
 
     // Metrics.
     private long bytesRead = 0;
@@ -105,13 +114,19 @@ public final class CinderConnection {
             CinderScheduler scheduler,
             Executor writeExecutor,
             boolean proxyProtocolEnabled,
-            Consumer<CinderConnection> closeCallback) {
+            Consumer<CinderConnection> closeCallback,
+            EntityUpdatePipeline entityPipeline,
+            ChunkLifecycleManager chunkManager,
+            int viewDistance) {
         this.socketChannel = socketChannel;
         this.remoteAddress = remoteAddress;
         this.scheduler = scheduler;
         this.writeExecutor = writeExecutor;
         this.proxyProtocolEnabled = proxyProtocolEnabled;
         this.closeCallback = closeCallback;
+        this.entityPipeline = entityPipeline;
+        this.chunkManager = chunkManager;
+        this.viewDistance = viewDistance;
         this.state = proxyProtocolEnabled ? ProtocolState.PROXY_HEADER : ProtocolState.HANDSHAKE;
     }
 
@@ -393,19 +408,35 @@ public final class CinderConnection {
         // Send Login Success (0x02) to transition client to PLAY state.
         sendLoginSuccess(uuid, name);
         state = ProtocolState.PLAY;
+
+        // Construct and register the PlayerEntity on the tick thread.
+        // CinderConnection is now in PLAY state; the entity's onSpawn() will
+        // send Login (Play) and the initial position sync.
+        final String playerNameFinal = name;
+        scheduler.submitSync("net:spawn:" + name, () -> {
+            PlayerEntity entity = new PlayerEntity(this, chunkManager, viewDistance);
+            entityPipeline.register(entity, dev.cinder.entity.EntityUpdatePipeline.EntityTier.CRITICAL);
+            this.playerEntity = entity;
+            entity.spawn();
+            LOG.info("[network] PlayerEntity registered: " + playerNameFinal
+                    + " entityId=" + entity.getEntityId());
+        });
     }
 
     private void handlePlayPacket(ByteBuffer payload) {
-        // Play-phase packet dispatch.
-        // PacketCodec will handle full decode once implemented.
-        // For now: read packet ID and log unknown packets at FINE level.
-        VarIntResult packetId = readVarInt(payload);
-        if (!packetId.valid) { close("malformed play packet"); return; }
-
-        // 0x15 = Confirm Teleportation, 0x1A = Keep Alive Response, etc.
-        // Full dispatch table lives in PacketCodec (Phase 2, task 3).
-        LOG.finest("[network] Play packet 0x" + Integer.toHexString(packetId.value)
-                + " len=" + payload.limit() + " from=" + playerName);
+        if (playerEntity == null) {
+            // PlayerEntity not yet registered — tick thread is still processing the spawn task.
+            // Silently discard; client will resend time-sensitive packets (keep-alive, movement).
+            return;
+        }
+        try {
+            InboundAction action = PacketCodec.decode(payload);
+            playerEntity.enqueueAction(action);
+            packetsDecoded++;
+        } catch (PacketCodec.DecodeException e) {
+            LOG.fine("[network] Decode error from " + playerName + ": " + e.getMessage());
+            close("protocol error: " + e.getMessage());
+        }
     }
 
     // -------------------------------------------------------------------------
@@ -522,7 +553,7 @@ public final class CinderConnection {
     // VarInt encode/decode
     // -------------------------------------------------------------------------
 
-    static final class VarIntResult {
+    private static final class VarIntResult {
         final boolean valid;
         final int value;
         final int bytesConsumed;
