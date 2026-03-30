@@ -4,6 +4,7 @@ import dev.cinder.chunk.ChunkLifecycleManager;
 import dev.cinder.chunk.ChunkPosition;
 import dev.cinder.chunk.CinderChunk;
 import dev.cinder.entity.EntityUpdatePipeline;
+import dev.cinder.network.CinderNetworkManager;
 import dev.cinder.profiling.TickProfiler;
 import dev.cinder.profiling.TickProfiler.RollingStats;
 
@@ -74,6 +75,7 @@ public final class CinderServer {
     private final TickProfiler           profiler;
     private final CinderTickLoop         tickLoop;
     private final CinderWatchdogNotifier watchdog;
+    private final CinderNetworkManager   networkManager;
 
     private Thread tickThread;
 
@@ -98,9 +100,17 @@ public final class CinderServer {
 
         this.tickLoop = new CinderTickLoop(tps, entityPipeline, chunkManager, profiler, scheduler);
 
+        int bindPort     = intProperty("cinder.network.port", 25565);
+        int viewDistance = intProperty("cinder.viewDistance", 8);
+        String bindHost  = System.getProperty("cinder.network.host", "0.0.0.0");
+
+        this.networkManager = new CinderNetworkManager(
+                scheduler, bindHost, bindPort, entityPipeline, chunkManager, viewDistance);
+        this.tickLoop.setNetworkManager(networkManager);
+
         LOG.info(String.format(
-            "[CinderServer] Constructed — tps=%d cacheSize=%d ioThreads=%d",
-            tps, cacheSize, ioThreads));
+            "[CinderServer] Constructed — tps=%d cacheSize=%d ioThreads=%d bind=%s:%d viewDistance=%d",
+            tps, cacheSize, ioThreads, bindHost, bindPort, viewDistance));
     }
 
     // ── Lifecycle ─────────────────────────────────────────────────────────
@@ -123,6 +133,12 @@ public final class CinderServer {
         preloadSpawnChunks();
         startTickThread();
         waitForSteadyState();
+
+        try {
+            networkManager.start();
+        } catch (java.io.IOException e) {
+            throw new RuntimeException("[CinderServer] Failed to start network manager", e);
+        }
 
         state.set(State.RUNNING);
         watchdog.notifyReady();
@@ -166,6 +182,7 @@ public final class CinderServer {
 
         LOG.info("[CinderServer] Tick loop stopped after " + tickLoop.getTickCount() + " ticks.");
 
+        networkManager.stop();
         chunkManager.shutdown();
         entityPipeline.shutdown();
         scheduler.shutdown();
