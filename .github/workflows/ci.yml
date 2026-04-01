@@ -241,18 +241,30 @@ jobs:
 
           TAG="v${VERSION}"
 
-          if ! git rev-parse "$TAG" >/dev/null 2>&1; then
+          if git ls-remote --exit-code --tags origin "refs/tags/${TAG}" >/dev/null 2>&1; then
+            echo "Remote tag $TAG already exists — continuing to release upload."
+          else
             git tag "$TAG"
             git push origin "$TAG"
-          else
-            echo "Tag $TAG already exists — continuing to release upload."
           fi
 
           if ! gh release view "$TAG" >/dev/null 2>&1; then
-            gh release create "$TAG" \
-              --title "Cinder ${VERSION}" \
-              --notes "Build from commit \`$(git rev-parse --short HEAD)\` on \`main\`." \
-              --latest
+            RELEASE_CREATED=false
+            for attempt in 1 2 3 4 5; do
+              if gh release create "$TAG" \
+                --title "Cinder ${VERSION}" \
+                --notes "Build from commit \`$(git rev-parse --short HEAD)\` on \`main\`." \
+                --latest; then
+                RELEASE_CREATED=true
+                break
+              fi
+              echo "Release create failed (attempt ${attempt}/5). Retrying..."
+              sleep $((attempt * 3))
+            done
+            if [[ "${RELEASE_CREATED}" != "true" ]]; then
+              echo "Release create failed after retries."
+              exit 1
+            fi
           fi
 
           ASSETS=(
@@ -265,6 +277,19 @@ jobs:
             ASSETS+=("$file")
           done < <(find dist-os -maxdepth 1 -type f ! -name 'SHA256SUMS' ! -name 'OS-SHA256SUMS' | sort)
 
-          gh release upload "$TAG" \
-            "${ASSETS[@]}" \
-            --clobber
+          UPLOAD_OK=false
+          for attempt in 1 2 3 4 5; do
+            if gh release upload "$TAG" \
+              "${ASSETS[@]}" \
+              --clobber; then
+              UPLOAD_OK=true
+              break
+            fi
+            echo "Release asset upload failed (attempt ${attempt}/5). Retrying..."
+            sleep $((attempt * 3))
+          done
+
+          if [[ "${UPLOAD_OK}" != "true" ]]; then
+            echo "Release asset upload failed after retries."
+            exit 1
+          fi
