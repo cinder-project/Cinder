@@ -4,6 +4,7 @@ import dev.cinder.chunk.ChunkLifecycleManager;
 import dev.cinder.chunk.ChunkPosition;
 import dev.cinder.entity.EntityUpdatePipeline.EntityTier;
 import dev.cinder.network.CinderConnection;
+import dev.cinder.network.ChunkDataPacketBuilder;
 import dev.cinder.network.PacketCodec;
 import dev.cinder.network.PacketCodec.InboundAction;
 import dev.cinder.network.PacketCodec.PlayerMoveAction;
@@ -11,6 +12,7 @@ import dev.cinder.network.PacketCodec.KeepAliveResponseAction;
 import dev.cinder.network.PacketCodec.ConfirmTeleportAction;
 import dev.cinder.network.PacketCodec.PlayerCommandAction;
 import dev.cinder.network.PacketCodec.UnknownAction;
+import dev.cinder.world.FlatWorldGenerator;
 
 import java.nio.ByteBuffer;
 import java.util.HashSet;
@@ -56,7 +58,7 @@ public final class PlayerEntity extends CinderEntity {
 
     private final CinderConnection connection;
     private final ChunkLifecycleManager chunkManager;
-    private final int viewDistance;
+    private volatile int viewDistance;
 
     // Teleport tracking — monotonically increasing, client must confirm each one.
     private final AtomicInteger teleportIdCounter = new AtomicInteger(0);
@@ -88,10 +90,10 @@ public final class PlayerEntity extends CinderEntity {
             CinderConnection connection,
             ChunkLifecycleManager chunkManager,
             int viewDistance) {
-        super(0.0, 64.0, 0.0); // spawn position; overridden by first position sync
+        super(0.0, FlatWorldGenerator.SURFACE_Y + 1.0, 0.0);
         this.connection   = connection;
         this.chunkManager = chunkManager;
-        this.viewDistance = Math.max(2, Math.min(viewDistance, 32));
+        this.viewDistance = clampViewDistance(viewDistance);
         setTier(EntityTier.CRITICAL);
     }
 
@@ -124,6 +126,9 @@ public final class PlayerEntity extends CinderEntity {
 
         // Send render distance.
         connection.enqueuePacket(PacketCodec.encodeSetRenderDistance(viewDistance));
+
+        ChunkPosition center = getChunkPosition();
+        connection.enqueuePacket(PacketCodec.encodeSetCenterChunk(center.x, center.z));
 
         // Teleport player to spawn position.
         sendPositionSync();
@@ -291,9 +296,11 @@ public final class PlayerEntity extends CinderEntity {
             if (!heldChunks.contains(pos)) {
                 chunkManager.addHolder(pos);
                 chunkManager.requestChunkWithCallback(pos, chunk -> {
-                    // Callback runs on cinder-chunk-io, promoted to tick thread by
-                    // ChunkLifecycleManager. Nothing to do here for Phase 2 —
-                    // chunk data packets are Phase 3 (world engine).
+                    // The callback executes on the tick thread; only send if still in view.
+                    if (connection.isClosed() || !heldChunks.contains(pos)) {
+                        return;
+                    }
+                    connection.enqueuePacket(ChunkDataPacketBuilder.build(chunk));
                 });
                 heldChunks.add(pos);
             }
@@ -341,6 +348,27 @@ public final class PlayerEntity extends CinderEntity {
     public CinderConnection getConnection() { return connection; }
     public boolean isSprinting()            { return sprinting;  }
     public boolean isSneaking()             { return sneaking;   }
+
+    /**
+     * Applies a runtime view-distance change for this player.
+     * Must be called on the tick thread.
+     */
+    public void updateViewDistance(int newViewDistance) {
+        int clamped = clampViewDistance(newViewDistance);
+        if (clamped == this.viewDistance) {
+            return;
+        }
+
+        int old = this.viewDistance;
+        this.viewDistance = clamped;
+
+        connection.enqueuePacket(PacketCodec.encodeSetRenderDistance(clamped));
+        updateChunkView(getChunkPosition());
+
+        LOG.info("[player] Updated view distance for " + connection.getPlayerName()
+                + ": " + old + " -> " + clamped);
+    }
+
     public int getViewDistance()            { return viewDistance; }
     public int getHeldChunkCount()          { return heldChunks.size(); }
 
@@ -350,5 +378,9 @@ public final class PlayerEntity extends CinderEntity {
     @Override
     protected EntityTier defaultTier() {
         return EntityTier.CRITICAL;
+    }
+
+    private static int clampViewDistance(int distance) {
+        return Math.max(2, Math.min(distance, 32));
     }
 }

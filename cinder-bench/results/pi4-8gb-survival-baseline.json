@@ -1,0 +1,23 @@
+{
+  "hardware": "Raspberry Pi 4 8GB",
+  "preset": "survival",
+  "capturedAtUtc": "2026-04-01T00:00:00Z",
+  "notes": "Reference baseline placeholder for controlled community submissions.",
+  "scenarios": {
+    "idle-0-players": {
+      "meanMspt": 4.2,
+      "p99Mspt": 9.7,
+      "tps": 20.0
+    },
+    "10-players": {
+      "meanMspt": 11.8,
+      "p99Mspt": 24.6,
+      "tps": 19.7
+    },
+    "20-players": {
+      "meanMspt": 27.9,
+      "p99Mspt": 46.5,
+      "tps": 18.4
+    }
+  }
+}

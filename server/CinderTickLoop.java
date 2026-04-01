@@ -3,8 +3,11 @@ package dev.cinder.server;
 import dev.cinder.chunk.ChunkLifecycleManager;
 import dev.cinder.entity.EntityUpdatePipeline;
 import dev.cinder.network.CinderNetworkManager;
+import dev.cinder.plugin.CinderEventBus;
+import dev.cinder.plugin.events.TickEvent;
 import dev.cinder.profiling.TickProfiler;
 import dev.cinder.profiling.TickSnapshot;
+import dev.cinder.world.CinderWorld;
 
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicLong;
@@ -92,6 +95,8 @@ public final class CinderTickLoop implements Runnable {
     private final ChunkLifecycleManager  chunkManager;
     private final TickProfiler           profiler;
     private final CinderScheduler        scheduler;
+    private volatile CinderWorld         world = null;
+    private volatile CinderEventBus      pluginEventBus = null;
     // Nullable — null until CinderServer calls setNetworkManager() after construction.
     private volatile CinderNetworkManager networkManager = null;
 
@@ -133,6 +138,21 @@ public final class CinderTickLoop implements Runnable {
      */
     public void setNetworkManager(CinderNetworkManager networkManager) {
         this.networkManager = networkManager;
+    }
+
+    /**
+     * Wire in the world container for WORLD-phase ticking.
+     * Called by {@link dev.cinder.server.CinderServer} during startup wiring.
+     */
+    public void setWorld(CinderWorld world) {
+        this.world = world;
+    }
+
+    /**
+     * Optional plugin event bus wiring for tick event publication.
+     */
+    public void setPluginEventBus(CinderEventBus pluginEventBus) {
+        this.pluginEventBus = pluginEventBus;
     }
 
     // ── Lifecycle ──────────────────────────────────────────────────────────
@@ -309,8 +329,10 @@ public final class CinderTickLoop implements Runnable {
      * uses a configurable per-chunk tick budget to bound their cost.
      */
     private void runWorldTick(long tick) {
-        // TODO(cinder-core): implement world environment systems
-        // Placeholder: no-op until CinderWorld is wired in.
+        CinderWorld activeWorld = this.world;
+        if (activeWorld != null) {
+            activeWorld.tick(tick);
+        }
     }
 
     /**
@@ -326,6 +348,11 @@ public final class CinderTickLoop implements Runnable {
         // this tick are complete — batch into minimum packet windows per connection.
         if (networkManager != null) {
             networkManager.flushAll();
+        }
+
+        CinderEventBus activeBus = this.pluginEventBus;
+        if (activeBus != null) {
+            activeBus.publish(new TickEvent(tick));
         }
         // TODO(cinder-core): record TPS/MSPT into Cinder Control metrics
     }

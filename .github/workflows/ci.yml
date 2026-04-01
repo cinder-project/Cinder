@@ -16,8 +16,6 @@ env:
   GRADLE_VERSION: '8.11'
 
 jobs:
-
-  # ── Build & test ──────────────────────────────────────────────────────────
   build:
     name: Build & Test
     runs-on: ubuntu-latest
@@ -86,7 +84,6 @@ jobs:
           path: build/libs/cinder-*.jar
           retention-days: 30
 
-  # ── ARM64 cross-compile verification ─────────────────────────────────────
   build-arm64:
     name: Cross-compile (ARM64)
     runs-on: ubuntu-latest
@@ -122,7 +119,6 @@ jobs:
           echo "Class file major version: $MAJOR"
           [ "$MAJOR" = "65" ] && echo "Java 21 confirmed." || (echo "Unexpected: $MAJOR" && exit 1)
 
-  # ── Release ───────────────────────────────────────────────────────────────
   release:
     name: Release
     runs-on: ubuntu-latest

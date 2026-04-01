@@ -78,7 +78,7 @@ public final class CinderConnection {
     private final Consumer<CinderConnection> closeCallback;
     private final EntityUpdatePipeline entityPipeline;
     private final ChunkLifecycleManager chunkManager;
-    private final int viewDistance;
+    private volatile int viewDistance;
 
     private SelectionKey selectionKey;
 
@@ -126,7 +126,7 @@ public final class CinderConnection {
         this.closeCallback = closeCallback;
         this.entityPipeline = entityPipeline;
         this.chunkManager = chunkManager;
-        this.viewDistance = viewDistance;
+        this.viewDistance = Math.max(2, Math.min(viewDistance, 32));
         this.state = proxyProtocolEnabled ? ProtocolState.PROXY_HEADER : ProtocolState.HANDSHAKE;
     }
 
@@ -641,6 +641,23 @@ public final class CinderConnection {
 
         try { socketChannel.close(); } catch (IOException ignored) {}
         closeCallback.accept(this);
+    }
+
+    /**
+     * Applies a runtime view-distance update for this connection/player.
+     * Should be called on the tick thread.
+     */
+    public void updateViewDistance(int newViewDistance) {
+        int clamped = Math.max(2, Math.min(newViewDistance, 32));
+        if (clamped == this.viewDistance) {
+            return;
+        }
+        this.viewDistance = clamped;
+
+        PlayerEntity entity = this.playerEntity;
+        if (entity != null) {
+            entity.updateViewDistance(clamped);
+        }
     }
 
     // -------------------------------------------------------------------------

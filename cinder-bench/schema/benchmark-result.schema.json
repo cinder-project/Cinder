@@ -1,0 +1,76 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://cinder.dev/schema/benchmark-result.schema.json",
+  "title": "CinderBenchmarkResult",
+  "type": "object",
+  "required": [
+    "scenario",
+    "startedAtUtc",
+    "warmupSec",
+    "steadySec",
+    "cooldownSec",
+    "samples",
+    "meanMspt",
+    "p95Mspt",
+    "p99Mspt",
+    "maxMspt",
+    "overrunCount",
+    "spikeCount"
+  ],
+  "properties": {
+    "scenario": {
+      "type": "string"
+    },
+    "startedAtUtc": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "warmupSec": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "steadySec": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "cooldownSec": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "samples": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "meanMspt": {
+      "type": "number",
+      "minimum": 0
+    },
+    "p95Mspt": {
+      "type": "number",
+      "minimum": 0
+    },
+    "p99Mspt": {
+      "type": "number",
+      "minimum": 0
+    },
+    "maxMspt": {
+      "type": "number",
+      "minimum": 0
+    },
+    "overrunCount": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "spikeCount": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "metadata": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "string"
+      }
+    }
+  },
+  "additionalProperties": false
+}
