@@ -1,6 +1,7 @@
 package dev.cinder.chunk;
 
 import dev.cinder.server.CinderScheduler;
+import dev.cinder.world.FlatWorldGenerator;
 
 import java.util.*;
 import java.util.concurrent.*;
@@ -67,6 +68,9 @@ public final class ChunkLifecycleManager {
     /** Default LRU cache capacity in chunks. */
     public static final int DEFAULT_CACHE_CAPACITY = 256;
 
+    /** Default dirty-save sweep interval in ticks (1 = every tick). */
+    public static final int DEFAULT_SAVE_INTERVAL_TICKS = 1;
+
     /**
      * Number of chunk loads attempted per tick.
      * Spread across ticks to smooth out IO-induced MSPT spikes.
@@ -88,7 +92,11 @@ public final class ChunkLifecycleManager {
      * Backed by a LinkedHashMap in access-order mode.
      */
     private final LinkedHashMap<ChunkPosition, CinderChunk> chunkCache;
-    private final int cacheCapacity;
+    private volatile int cacheCapacity;
+
+    /** Dirty-save sweep cadence. 0 disables periodic dirty saves. */
+    private volatile int saveIntervalTicks = DEFAULT_SAVE_INTERVAL_TICKS;
+    private long lastSaveSweepTick = 0L;
 
     // ── Queues and sets (tick thread only unless noted) ───────────────────
 
@@ -117,6 +125,7 @@ public final class ChunkLifecycleManager {
 
     private final CinderScheduler scheduler;
     private final ChunkStorage     storage;
+    private final FlatWorldGenerator worldGenerator;
 
     // ── Statistics ────────────────────────────────────────────────────────
 
@@ -136,14 +145,15 @@ public final class ChunkLifecycleManager {
     ) {
         this.scheduler     = Objects.requireNonNull(scheduler, "scheduler");
         this.storage       = Objects.requireNonNull(storage, "storage");
-        this.cacheCapacity = cacheCapacity;
+        this.worldGenerator = new FlatWorldGenerator();
+        this.cacheCapacity = Math.max(16, cacheCapacity);
 
         // LinkedHashMap in access-order mode acts as an LRU cache.
         // removeEldestEntry is overridden to trigger eviction when over capacity.
         this.chunkCache = new LinkedHashMap<>(cacheCapacity, 0.75f, /*accessOrder=*/ true) {
             @Override
             protected boolean removeEldestEntry(Map.Entry<ChunkPosition, CinderChunk> eldest) {
-                if (size() > cacheCapacity) {
+                if (size() > ChunkLifecycleManager.this.cacheCapacity) {
                     CinderChunk chunk = eldest.getValue();
                     if (chunk.getHolderCount() == 0) {
                         scheduleEviction(eldest.getKey(), chunk);
@@ -166,7 +176,7 @@ public final class ChunkLifecycleManager {
         );
 
         LOG.info(String.format(
-            "[ChunkManager] Initialized — cache=%d chunks, ioThreads=%d", cacheCapacity, ioThreads));
+            "[ChunkManager] Initialized — cache=%d chunks, ioThreads=%d", this.cacheCapacity, ioThreads));
     }
 
     /** Convenience constructor with defaults suited for Pi 4 + microSD. */
@@ -186,7 +196,21 @@ public final class ChunkLifecycleManager {
      */
     public void tick(long tickNumber) {
         processLoadQueue();
-        processDirtyQueue();
+        if (shouldRunDirtySweep(tickNumber)) {
+            processDirtyQueue();
+        }
+    }
+
+    private boolean shouldRunDirtySweep(long tickNumber) {
+        int interval = saveIntervalTicks;
+        if (interval <= 0) {
+            return false;
+        }
+        if (tickNumber - lastSaveSweepTick >= interval) {
+            lastSaveSweepTick = tickNumber;
+            return true;
+        }
+        return false;
     }
 
     // ── Public API (tick thread) ──────────────────────────────────────────
@@ -256,6 +280,51 @@ public final class ChunkLifecycleManager {
         if (chunkCache.containsKey(pos)) {
             dirtySet.add(pos);
         }
+    }
+
+    /** Returns the current LRU cache capacity. */
+    public int getCacheCapacity() {
+        return cacheCapacity;
+    }
+
+    /**
+     * Updates the LRU cache capacity at runtime.
+     * Must be called on the tick thread.
+     */
+    public void updateCacheCapacity(int newCapacity) {
+        int normalized = Math.max(16, newCapacity);
+        if (normalized == cacheCapacity) {
+            return;
+        }
+        int old = cacheCapacity;
+        cacheCapacity = normalized;
+        trimCacheToCapacity();
+
+        LOG.info(String.format(
+            "[ChunkManager] Cache capacity updated: %d -> %d", old, normalized));
+    }
+
+    /** Returns the current dirty-save sweep interval in ticks. */
+    public int getSaveIntervalTicks() {
+        return saveIntervalTicks;
+    }
+
+    /**
+     * Updates the dirty-save sweep interval at runtime.
+     * 0 disables periodic dirty saves (benchmark mode).
+     */
+    public void setSaveIntervalTicks(int intervalTicks) {
+        int normalized = Math.max(0, intervalTicks);
+        if (normalized == saveIntervalTicks) {
+            return;
+        }
+        int old = saveIntervalTicks;
+        saveIntervalTicks = normalized;
+        lastSaveSweepTick = 0L;
+
+        LOG.info(String.format(
+            "[ChunkManager] Save sweep interval updated: %d -> %d ticks",
+            old, normalized));
     }
 
     /**
@@ -370,8 +439,8 @@ public final class ChunkLifecycleManager {
             try {
                 chunk = storage.load(pos);
                 if (chunk == null) {
-                    // Chunk does not exist on disk — generate a new one.
-                    chunk = CinderChunk.generate(pos);
+                    // Chunk does not exist on disk — generate deterministic flat terrain.
+                    chunk = worldGenerator.generate(pos);
                 }
             } catch (Exception e) {
                 LOG.log(Level.WARNING, "[ChunkManager] Async load failed for " + pos, e);
@@ -432,6 +501,28 @@ public final class ChunkLifecycleManager {
         }
 
         LOG.fine("[ChunkManager] Evicted chunk " + pos);
+    }
+
+    /**
+     * Evicts least-recently-used holder-free chunks until cache fits capacity.
+     * Must run on the tick thread.
+     */
+    private void trimCacheToCapacity() {
+        if (chunkCache.size() <= cacheCapacity) {
+            return;
+        }
+
+        Iterator<Map.Entry<ChunkPosition, CinderChunk>> it = chunkCache.entrySet().iterator();
+        while (chunkCache.size() > cacheCapacity && it.hasNext()) {
+            Map.Entry<ChunkPosition, CinderChunk> entry = it.next();
+            CinderChunk chunk = entry.getValue();
+            if (chunk.getHolderCount() > 0) {
+                continue;
+            }
+            scheduleEviction(entry.getKey(), chunk);
+            totalEvictions++;
+            it.remove();
+        }
     }
 
     // ── Shutdown ──────────────────────────────────────────────────────────

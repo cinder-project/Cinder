@@ -63,6 +63,9 @@ public final class CinderWorld {
 
     private boolean doDaylightCycle = true;
 
+    /** Runtime simulation radius (chunks). Used by adaptive tuning controls. */
+    private volatile int simulationDistance = 6;
+
     // ── Weather ───────────────────────────────────────────────────────────
 
     public enum Weather { CLEAR, RAIN, THUNDER }
@@ -91,6 +94,10 @@ public final class CinderWorld {
     private final ChunkLifecycleManager chunkManager;
     private final EntityUpdatePipeline  entityPipeline;
     private final CinderScheduler       scheduler;
+    private final FlatWorldGenerator    worldGenerator;
+    private final BlockTickScheduler    blockTickScheduler;
+    private final FluidUpdateSystem     fluidUpdateSystem;
+    private final SpawnController       spawnController;
 
     // ── Identity ──────────────────────────────────────────────────────────
 
@@ -108,6 +115,10 @@ public final class CinderWorld {
         this.chunkManager  = Objects.requireNonNull(chunkManager, "chunkManager");
         this.entityPipeline = Objects.requireNonNull(entityPipeline, "entityPipeline");
         this.scheduler     = Objects.requireNonNull(scheduler, "scheduler");
+        this.worldGenerator = new FlatWorldGenerator();
+        this.blockTickScheduler = new BlockTickScheduler();
+        this.fluidUpdateSystem = new FluidUpdateSystem();
+        this.spawnController = new SpawnController();
 
         LOG.info("[CinderWorld] Initialised world: " + worldName);
     }
@@ -128,6 +139,9 @@ public final class CinderWorld {
         if (doWeatherCycle) {
             tickWeather();
         }
+
+        blockTickScheduler.tick(tickNumber);
+        fluidUpdateSystem.tick(this);
     }
 
     // ── Weather state machine ─────────────────────────────────────────────
@@ -193,8 +207,15 @@ public final class CinderWorld {
         Objects.requireNonNull(entity, "entity");
         Objects.requireNonNull(tier, "tier");
 
+        if (!spawnController.canSpawn(entity.getChunkPosition())) {
+            LOG.fine("[CinderWorld] Spawn denied by cap for entity " + entity.getEntityId()
+                + " at " + entity.getChunkPosition());
+            return;
+        }
+
         entities.put(entity.getEntityId(), entity);
         entityPipeline.register(entity, tier);
+        spawnController.onSpawn(entity.getChunkPosition());
 
         ChunkPosition chunkPos = entity.getChunkPosition();
         chunkManager.addHolder(chunkPos);
@@ -214,6 +235,7 @@ public final class CinderWorld {
         if (entities.remove(entity.getEntityId()) != null) {
             entityPipeline.remove(entity);
             chunkManager.removeHolder(entity.getChunkPosition());
+            spawnController.onDespawn(entity.getChunkPosition());
             entity.kill();
 
             LOG.fine("[CinderWorld] Despawned entity " + entity.getEntityId());
@@ -256,7 +278,18 @@ public final class CinderWorld {
      * on the tick thread when it becomes available.
      */
     public void loadChunk(ChunkPosition pos, java.util.function.Consumer<CinderChunk> onLoad) {
-        chunkManager.requestChunkWithCallback(pos, onLoad);
+        Objects.requireNonNull(pos, "pos");
+        Objects.requireNonNull(onLoad, "onLoad");
+
+        chunkManager.requestChunkWithCallback(pos, chunk -> {
+            if (chunk != null) {
+                onLoad.accept(chunk);
+                return;
+            }
+
+            // Defensive fallback: never propagate a null chunk to world callers.
+            onLoad.accept(worldGenerator.generate(pos));
+        });
     }
 
     /**
@@ -296,6 +329,14 @@ public final class CinderWorld {
 
     public void setDoDaylightCycle(boolean enabled) {
         this.doDaylightCycle = enabled;
+    }
+
+    public int getSimulationDistance() {
+        return simulationDistance;
+    }
+
+    public void setSimulationDistance(int simulationDistance) {
+        this.simulationDistance = Math.max(2, Math.min(simulationDistance, 32));
     }
 
     // ── Weather accessors ─────────────────────────────────────────────────

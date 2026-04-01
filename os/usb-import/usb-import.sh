@@ -97,6 +97,9 @@ readonly USB_IMPORT_SUBDIR="cinder-import"
 # Set to "" to disable allowlist enforcement.
 : "${ALLOWLIST_FILE:="${CINDER_BASE_DIR}/config/import-allowlist.sha256"}"
 
+# Dedicated plugin JAR allowlist. Plugin jars under /plugins must appear here.
+: "${PLUGIN_ALLOWLIST_FILE:="${CINDER_BASE_DIR}/config/plugin-import-allowlist.sha256"}"
+
 # Maximum allowed size per import file (bytes). Default: 100 MB.
 readonly MAX_FILE_SIZE_BYTES=$(( 100 * 1024 * 1024 ))
 
@@ -327,6 +330,20 @@ elif [[ -n "${ALLOWLIST_FILE}" && ! -f "${ALLOWLIST_FILE}" ]]; then
     warn "Proceeding without allowlist enforcement."
 fi
 
+# Load plugin-specific allowlist hashes (strict for plugin JARs)
+declare -A PLUGIN_ALLOWLIST_HASHES=()
+if [[ -n "${PLUGIN_ALLOWLIST_FILE}" && -f "${PLUGIN_ALLOWLIST_FILE}" ]]; then
+    log "Loading plugin allowlist from ${PLUGIN_ALLOWLIST_FILE}..."
+    while IFS= read -r line; do
+        hash="$(echo "${line}" | awk '{print $1}')"
+        [[ -n "${hash}" ]] && PLUGIN_ALLOWLIST_HASHES["${hash}"]=1
+    done < "${PLUGIN_ALLOWLIST_FILE}"
+    log "Loaded ${#PLUGIN_ALLOWLIST_HASHES[@]} plugin allowlisted hashes."
+elif [[ -n "${PLUGIN_ALLOWLIST_FILE}" && ! -f "${PLUGIN_ALLOWLIST_FILE}" ]]; then
+    warn "Plugin allowlist not found: ${PLUGIN_ALLOWLIST_FILE}"
+    warn "Plugin JAR imports will be rejected until allowlist is provided."
+fi
+
 for filepath in "${IMPORT_FILES[@]}"; do
     relpath="${filepath#"${USB_IMPORT_DIR}/"}"
     filename="$(basename "${filepath}")"
@@ -376,6 +393,18 @@ for filepath in "${IMPORT_FILES[@]}"; do
         file_hash="$(sha256sum "${filepath}" | awk '{print $1}')"
         if [[ -z "${ALLOWLIST_HASHES["${file_hash}"]:-}" ]]; then
             reject_reason="hash not in allowlist: ${file_hash}"
+        fi
+    fi
+
+    # Plugin JAR allowlist check (always enforced for plugins/*.jar)
+    if [[ -z "${reject_reason}" && "${relpath}" == plugins/*.jar ]]; then
+        if [[ "${#PLUGIN_ALLOWLIST_HASHES[@]}" -eq 0 ]]; then
+            reject_reason="plugin allowlist missing or empty: ${PLUGIN_ALLOWLIST_FILE}"
+        else
+            file_hash="$(sha256sum "${filepath}" | awk '{print $1}')"
+            if [[ -z "${PLUGIN_ALLOWLIST_HASHES["${file_hash}"]:-}" ]]; then
+                reject_reason="plugin jar hash not in plugin allowlist: ${file_hash}"
+            fi
         fi
     fi
 

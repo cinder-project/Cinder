@@ -52,7 +52,7 @@ public final class CinderNetworkManager {
     private final int bindPort;
     private final EntityUpdatePipeline entityPipeline;
     private final ChunkLifecycleManager chunkManager;
-    private final int viewDistance;
+    private volatile int viewDistance;
 
     private volatile boolean proxyProtocolEnabled = false;
 
@@ -86,7 +86,7 @@ public final class CinderNetworkManager {
         this.bindPort = bindPort;
         this.entityPipeline = entityPipeline;
         this.chunkManager = chunkManager;
-        this.viewDistance = viewDistance;
+        this.viewDistance = clampViewDistance(viewDistance);
         // Pi 4 has 4 cores. Two write workers is enough for buffered outbound flushing
         // without starving the tick thread or the accept loop.
         this.writeExecutor = Executors.newFixedThreadPool(2, r -> {
@@ -95,6 +95,11 @@ public final class CinderNetworkManager {
             t.setPriority(Thread.NORM_PRIORITY - 1);
             return t;
         });
+    }
+
+    /** Convenience constructor for tests that only exercise utility methods. */
+    public CinderNetworkManager(CinderScheduler scheduler, String bindHost, int bindPort) {
+        this(scheduler, bindHost, bindPort, null, null, 8);
     }
 
     // -------------------------------------------------------------------------
@@ -339,6 +344,38 @@ public final class CinderNetworkManager {
         return proxyProtocolEnabled;
     }
 
+    public int getViewDistance() {
+        return viewDistance;
+    }
+
+    /**
+     * Updates runtime view distance and applies it to active connections.
+     * Existing players are adjusted on the tick thread via scheduler.
+     */
+    public void updateViewDistance(int newViewDistance) {
+        int clamped = clampViewDistance(newViewDistance);
+        if (clamped == this.viewDistance) {
+            return;
+        }
+
+        int old = this.viewDistance;
+        this.viewDistance = clamped;
+
+        Runnable apply = () -> {
+            for (CinderConnection connection : connections.values()) {
+                connection.updateViewDistance(clamped);
+            }
+        };
+
+        if (scheduler != null) {
+            scheduler.submitSync("network-view-distance-update", apply);
+        } else {
+            apply.run();
+        }
+
+        LOG.info("[network] View distance updated: " + old + " -> " + clamped);
+    }
+
     // -------------------------------------------------------------------------
     // Diagnostics
     // -------------------------------------------------------------------------
@@ -353,6 +390,10 @@ public final class CinderNetworkManager {
 
     private static void silentClose(Channel ch) {
         try { ch.close(); } catch (IOException ignored) {}
+    }
+
+    private static int clampViewDistance(int distance) {
+        return Math.max(2, Math.min(distance, 32));
     }
 
     // -------------------------------------------------------------------------

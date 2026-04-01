@@ -1,0 +1,45 @@
+name: Bug Report
+description: Report a bug in Cinder runtime, control, or distro image.
+title: "[Bug]: "
+labels:
+  - bug
+body:
+  - type: input
+    id: version
+    attributes:
+      label: Cinder Version
+      description: Release tag or commit SHA.
+      placeholder: v0.1.0
+    validations:
+      required: true
+  - type: input
+    id: hardware
+    attributes:
+      label: Hardware
+      description: Device model and RAM.
+      placeholder: Raspberry Pi 4 8GB
+    validations:
+      required: true
+  - type: input
+    id: preset
+    attributes:
+      label: Preset
+      description: Active runtime preset.
+      placeholder: survival
+    validations:
+      required: true
+  - type: textarea
+    id: description
+    attributes:
+      label: What happened?
+      description: Include expected vs actual behavior.
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant Logs
+      description: Paste server, launch, or health-check output.
+      render: shell
+    validations:
+      required: true

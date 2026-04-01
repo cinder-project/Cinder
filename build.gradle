@@ -21,6 +21,8 @@ sourceSets {
                 'profiling',
                 'world',
                 'network',
+                'plugin',
+                'cinder-bench',
             ]
         }
     }

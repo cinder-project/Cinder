@@ -5,9 +5,26 @@ import dev.cinder.chunk.ChunkPosition;
 import dev.cinder.chunk.CinderChunk;
 import dev.cinder.entity.EntityUpdatePipeline;
 import dev.cinder.network.CinderNetworkManager;
+import dev.cinder.plugin.CinderEventBus;
+import dev.cinder.plugin.command.CinderCommandRegistry;
+import dev.cinder.plugin.loader.CinderPluginLoader;
 import dev.cinder.profiling.TickProfiler;
 import dev.cinder.profiling.TickProfiler.RollingStats;
+import dev.cinder.world.CinderWorld;
 
+import java.io.IOException;
+import java.lang.management.GarbageCollectorMXBean;
+import java.lang.management.ManagementFactory;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.nio.file.Paths;
+import java.time.Duration;
+import java.time.Instant;
+import java.time.ZoneOffset;
+import java.time.format.DateTimeFormatter;
+import java.util.Locale;
+import java.util.Properties;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
@@ -61,9 +78,27 @@ public final class CinderServer {
     private static final int    STATUS_INTERVAL_SECONDS  = 10;
     private static final int    SPAWN_PRELOAD_RADIUS      = 2;
 
+    private static final double DEGRADED_TPS_THRESHOLD       = 18.5;
+    private static final double DEGRADED_MEAN_MSPT_THRESHOLD = 45.0;
+    private static final double DEGRADED_P99_MSPT_THRESHOLD  = 60.0;
+    private static final int    DEGRADED_WINDOWS_FOR_SHED    = 3;
+    private static final int    HEALTHY_WINDOWS_FOR_RECOVER  = 6;
+
     public static final String PROP_TPS          = "cinder.tps";
     public static final String PROP_CACHE_SIZE   = "cinder.chunk.cacheSize";
     public static final String PROP_IO_THREADS   = "cinder.chunk.ioThreads";
+    public static final String PROP_VIEW_DISTANCE = "cinder.viewDistance";
+    public static final String PROP_SIMULATION_DISTANCE = "cinder.simulationDistance";
+    public static final String PROP_DEFERRED_INTERVAL = "cinder.entity.deferredInterval";
+    public static final String PROP_SAVE_INTERVAL_TICKS = "cinder.saveIntervalTicks";
+    public static final String PROP_RUNTIME_CONFIG_PATH = "cinder.runtimeConfigPath";
+    public static final String PROP_ADAPTIVE_ENABLED = "cinder.adaptive.enabled";
+    public static final String PROP_ADAPTIVE_MIN_SIMULATION_DISTANCE =
+        "cinder.adaptive.minSimulationDistance";
+    public static final String PROP_ADAPTIVE_MAX_DEFERRED_INTERVAL =
+        "cinder.adaptive.maxDeferredInterval";
+    public static final String PROP_PLUGINS_DIR = "cinder.pluginsDir";
+    public static final String PROP_PLUGIN_DATA_DIR = "cinder.pluginDataDir";
 
     public enum State { CREATED, STARTING, RUNNING, STOPPING, STOPPED }
 
@@ -72,10 +107,29 @@ public final class CinderServer {
     private final CinderScheduler        scheduler;
     private final EntityUpdatePipeline   entityPipeline;
     private final ChunkLifecycleManager  chunkManager;
+    private final CinderWorld            world;
     private final TickProfiler           profiler;
     private final CinderTickLoop         tickLoop;
     private final CinderWatchdogNotifier watchdog;
     private final CinderNetworkManager   networkManager;
+    private final CinderEventBus         eventBus;
+    private final CinderCommandRegistry  commandRegistry;
+    private final CinderPluginLoader     pluginLoader;
+    private final String                 presetName;
+    private final String                 logDir;
+    private final String                 runtimeConfigPath;
+    private final boolean                adaptiveEnabled;
+    private final int                    adaptiveMinSimulationDistance;
+    private final int                    adaptiveMaxDeferredInterval;
+    private final Instant                startInstant = Instant.now();
+    private final long                   gcEventsAtStartup;
+
+    private volatile RuntimeTargets baseTargets;
+    private volatile RuntimeTargets activeTargets;
+    private volatile int peakPlayerCount = 0;
+    private volatile int degradedWindows = 0;
+    private volatile int healthyWindows = 0;
+    private volatile long runtimeConfigLastModifiedMs = -1L;
 
     private Thread tickThread;
 
@@ -91,26 +145,74 @@ public final class CinderServer {
         int tps       = intProperty(PROP_TPS, 20);
         int cacheSize = intProperty(PROP_CACHE_SIZE, ChunkLifecycleManager.DEFAULT_CACHE_CAPACITY);
         int ioThreads = intProperty(PROP_IO_THREADS, 1);
+        int viewDistance = intProperty(PROP_VIEW_DISTANCE, 8);
+        int simulationDistance = intProperty(PROP_SIMULATION_DISTANCE, viewDistance);
+        int deferredInterval = intProperty(PROP_DEFERRED_INTERVAL, 4);
+        int saveIntervalTicks = intProperty(
+            PROP_SAVE_INTERVAL_TICKS,
+            ChunkLifecycleManager.DEFAULT_SAVE_INTERVAL_TICKS);
+
+        this.baseTargets = RuntimeTargets.of(
+            cacheSize,
+            deferredInterval,
+            Math.min(viewDistance, simulationDistance),
+            saveIntervalTicks
+        );
+        this.activeTargets = baseTargets;
 
         this.scheduler      = CinderScheduler.createDefault();
+        this.eventBus       = new CinderEventBus(scheduler);
+        this.commandRegistry = new CinderCommandRegistry(scheduler);
         this.entityPipeline = EntityUpdatePipeline.create();
         this.chunkManager   = new ChunkLifecycleManager(scheduler, storage, cacheSize, ioThreads);
+        this.world          = new CinderWorld("world", chunkManager, entityPipeline, scheduler);
         this.profiler       = TickProfiler.createDefault();
         this.watchdog       = new CinderWatchdogNotifier();
+
+        Path pluginsDir = Paths.get(System.getProperty(PROP_PLUGINS_DIR, "plugins"));
+        Path pluginDataDir = Paths.get(System.getProperty(PROP_PLUGIN_DATA_DIR, "plugin-data"));
+        this.pluginLoader = new CinderPluginLoader(
+            scheduler,
+            eventBus,
+            commandRegistry,
+            pluginsDir,
+            pluginDataDir
+        );
+
+        this.chunkManager.setSaveIntervalTicks(baseTargets.saveIntervalTicks());
+        this.entityPipeline.setDeferredTickInterval(baseTargets.deferredIntervalTicks());
+        this.world.setSimulationDistance(baseTargets.simulationDistance());
 
         this.tickLoop = new CinderTickLoop(tps, entityPipeline, chunkManager, profiler, scheduler);
 
         int bindPort     = intProperty("cinder.network.port", 25565);
-        int viewDistance = intProperty("cinder.viewDistance", 8);
         String bindHost  = System.getProperty("cinder.network.host", "0.0.0.0");
 
         this.networkManager = new CinderNetworkManager(
-                scheduler, bindHost, bindPort, entityPipeline, chunkManager, viewDistance);
+                scheduler, bindHost, bindPort, entityPipeline, chunkManager,
+                baseTargets.simulationDistance());
+        this.tickLoop.setWorld(world);
+        this.tickLoop.setPluginEventBus(eventBus);
         this.tickLoop.setNetworkManager(networkManager);
 
+        this.presetName = System.getProperty("cinder.preset", "unknown");
+        this.logDir = System.getProperty("cinder.logDir", "logs");
+        this.runtimeConfigPath = System.getProperty(PROP_RUNTIME_CONFIG_PATH, "");
+        this.adaptiveEnabled = boolProperty(PROP_ADAPTIVE_ENABLED, true);
+        this.adaptiveMinSimulationDistance = intProperty(
+            PROP_ADAPTIVE_MIN_SIMULATION_DISTANCE, 4);
+        this.adaptiveMaxDeferredInterval = intProperty(
+            PROP_ADAPTIVE_MAX_DEFERRED_INTERVAL, 8);
+        this.gcEventsAtStartup = getGcEventCount();
+
         LOG.info(String.format(
-            "[CinderServer] Constructed — tps=%d cacheSize=%d ioThreads=%d bind=%s:%d viewDistance=%d",
-            tps, cacheSize, ioThreads, bindHost, bindPort, viewDistance));
+            "[CinderServer] Constructed — tps=%d cacheSize=%d ioThreads=%d bind=%s:%d " +
+            "simulationDistance=%d deferredInterval=%d saveInterval=%d adaptive=%s",
+            tps, cacheSize, ioThreads, bindHost, bindPort,
+            baseTargets.simulationDistance(),
+            baseTargets.deferredIntervalTicks(),
+            baseTargets.saveIntervalTicks(),
+            adaptiveEnabled));
     }
 
     // ── Lifecycle ─────────────────────────────────────────────────────────
@@ -140,8 +242,11 @@ public final class CinderServer {
             throw new RuntimeException("[CinderServer] Failed to start network manager", e);
         }
 
+        pluginLoader.loadAll();
+
         state.set(State.RUNNING);
         watchdog.notifyReady();
+        pollAndApplyRuntimeConfig(true);
         startStatusReporter();
 
         LOG.info("[CinderServer] Started. Tick loop is in steady state.");
@@ -183,9 +288,11 @@ public final class CinderServer {
         LOG.info("[CinderServer] Tick loop stopped after " + tickLoop.getTickCount() + " ticks.");
 
         networkManager.stop();
+        pluginLoader.shutdown();
         chunkManager.shutdown();
         entityPipeline.shutdown();
         scheduler.shutdown();
+        writeSessionReport();
 
         state.set(State.STOPPED);
         LOG.info("[CinderServer] Shutdown complete.");
@@ -242,10 +349,18 @@ public final class CinderServer {
         statusReporter.scheduleAtFixedRate(() -> {
             try {
                 RollingStats stats = profiler.computeStats();
-                String status = String.format("TPS=%.1f MSPT=%.2fms p99=%.2fms ticks=%d",
-                    stats.tps, stats.meanMspt, stats.p99Mspt, profiler.getTotalTicks());
+                int players = networkManager.getConnectionCount();
+                peakPlayerCount = Math.max(peakPlayerCount, players);
+
+                String status = String.format("TPS=%.1f MSPT=%.2fms p99=%.2fms ticks=%d players=%d",
+                    stats.tps, stats.meanMspt, stats.p99Mspt, profiler.getTotalTicks(), players);
                 watchdog.notifyStatus(status);
                 watchdog.ping();
+
+                pollAndApplyRuntimeConfig(false);
+                if (adaptiveEnabled) {
+                    evaluateAdaptiveGovernor(stats);
+                }
 
                 if (stats.isTpsDegraded()) {
                     LOG.warning("[CinderServer] TPS degraded: " + stats.toStatusLine());
@@ -263,6 +378,217 @@ public final class CinderServer {
                 shutdown();
             }
         }, "cinder-shutdown-hook"));
+    }
+
+    private void pollAndApplyRuntimeConfig(boolean force) {
+        if (runtimeConfigPath == null || runtimeConfigPath.isBlank()) {
+            return;
+        }
+
+        Path path = Paths.get(runtimeConfigPath);
+        if (!Files.exists(path)) {
+            return;
+        }
+
+        try {
+            long modifiedMs = Files.getLastModifiedTime(path).toMillis();
+            if (!force && modifiedMs == runtimeConfigLastModifiedMs) {
+                return;
+            }
+
+            RuntimeTargets loadedTargets = loadRuntimeTargets(path, baseTargets);
+            runtimeConfigLastModifiedMs = modifiedMs;
+
+            if (!force && loadedTargets.equals(baseTargets)) {
+                return;
+            }
+
+            baseTargets = loadedTargets;
+            activeTargets = loadedTargets;
+            degradedWindows = 0;
+            healthyWindows = 0;
+
+            applyRuntimeTargets(loadedTargets, "runtime-hot-swap");
+            LOG.info("[CinderServer] Applied runtime config from " + path + ": " + loadedTargets);
+        } catch (IOException e) {
+            LOG.log(Level.WARNING, "[CinderServer] Failed to read runtime config: " + path, e);
+        }
+    }
+
+    private RuntimeTargets loadRuntimeTargets(Path path, RuntimeTargets defaults) throws IOException {
+        Properties props = new Properties();
+        try (var in = Files.newInputStream(path)) {
+            props.load(in);
+        }
+
+        int cacheSize = intProperty(props, PROP_CACHE_SIZE, defaults.chunkCacheSize());
+        int deferredInterval = intProperty(props, PROP_DEFERRED_INTERVAL, defaults.deferredIntervalTicks());
+        int viewDistance = intProperty(props, PROP_VIEW_DISTANCE, defaults.simulationDistance());
+        int simulationDistance = intProperty(props, PROP_SIMULATION_DISTANCE, viewDistance);
+        int saveInterval = intProperty(props, PROP_SAVE_INTERVAL_TICKS, defaults.saveIntervalTicks());
+
+        return RuntimeTargets.of(
+            cacheSize,
+            deferredInterval,
+            Math.min(viewDistance, simulationDistance),
+            saveInterval
+        );
+    }
+
+    private void applyRuntimeTargets(RuntimeTargets targets, String reason) {
+        networkManager.updateViewDistance(targets.simulationDistance());
+        scheduler.submitSync("runtime-targets:" + reason, () -> {
+            chunkManager.updateCacheCapacity(targets.chunkCacheSize());
+            chunkManager.setSaveIntervalTicks(targets.saveIntervalTicks());
+            entityPipeline.setDeferredTickInterval(targets.deferredIntervalTicks());
+            world.setSimulationDistance(targets.simulationDistance());
+        });
+    }
+
+    private void evaluateAdaptiveGovernor(RollingStats stats) {
+        boolean degraded = stats.tps < DEGRADED_TPS_THRESHOLD
+            || stats.meanMspt > DEGRADED_MEAN_MSPT_THRESHOLD
+            || stats.p99Mspt > DEGRADED_P99_MSPT_THRESHOLD;
+
+        if (degraded) {
+            degradedWindows++;
+            healthyWindows = 0;
+        } else {
+            healthyWindows++;
+            degradedWindows = 0;
+        }
+
+        if (degraded && degradedWindows >= DEGRADED_WINDOWS_FOR_SHED) {
+            degradedWindows = 0;
+            shedLoad(stats);
+            return;
+        }
+
+        if (!degraded && healthyWindows >= HEALTHY_WINDOWS_FOR_RECOVER) {
+            healthyWindows = 0;
+            recoverLoad(stats);
+        }
+    }
+
+    private void shedLoad(RollingStats stats) {
+        RuntimeTargets current = activeTargets;
+        RuntimeTargets next = current;
+
+        if (current.simulationDistance() > adaptiveMinSimulationDistance) {
+            next = current.withSimulationDistance(current.simulationDistance() - 1);
+        } else if (current.deferredIntervalTicks() < adaptiveMaxDeferredInterval) {
+            next = current.withDeferredInterval(current.deferredIntervalTicks() + 1);
+        }
+
+        if (next.equals(current)) {
+            return;
+        }
+
+        activeTargets = next;
+        applyRuntimeTargets(next, "adaptive-shed");
+
+        LOG.warning(String.format(Locale.ROOT,
+            "[CinderServer] Adaptive governor shed load: simDistance=%d deferredInterval=%d " +
+            "(TPS=%.2f mean=%.2fms p99=%.2fms)",
+            next.simulationDistance(),
+            next.deferredIntervalTicks(),
+            stats.tps,
+            stats.meanMspt,
+            stats.p99Mspt));
+    }
+
+    private void recoverLoad(RollingStats stats) {
+        RuntimeTargets baseline = baseTargets;
+        RuntimeTargets current = activeTargets;
+
+        if (current.equals(baseline)) {
+            return;
+        }
+
+        RuntimeTargets next = current;
+        if (current.deferredIntervalTicks() > baseline.deferredIntervalTicks()) {
+            next = current.withDeferredInterval(current.deferredIntervalTicks() - 1);
+        } else if (current.simulationDistance() < baseline.simulationDistance()) {
+            next = current.withSimulationDistance(current.simulationDistance() + 1);
+        }
+
+        if (next.equals(current)) {
+            return;
+        }
+
+        activeTargets = next;
+        applyRuntimeTargets(next, "adaptive-recover");
+
+        LOG.info(String.format(Locale.ROOT,
+            "[CinderServer] Adaptive governor recovered load: simDistance=%d deferredInterval=%d " +
+            "(TPS=%.2f mean=%.2fms p99=%.2fms)",
+            next.simulationDistance(),
+            next.deferredIntervalTicks(),
+            stats.tps,
+            stats.meanMspt,
+            stats.p99Mspt));
+    }
+
+    private void writeSessionReport() {
+        try {
+            Path logsPath = Paths.get(logDir);
+            Files.createDirectories(logsPath);
+
+            Instant endInstant = Instant.now();
+            RollingStats stats = profiler.computeStats();
+            long totalTicks = profiler.getTotalTicks();
+            long gcEvents = Math.max(0L, getGcEventCount() - gcEventsAtStartup);
+            double durationSeconds = Duration.between(startInstant, endInstant).toMillis() / 1000.0;
+
+            String stamp = DateTimeFormatter.ofPattern("yyyyMMdd'T'HHmmss'Z'")
+                .withZone(ZoneOffset.UTC)
+                .format(endInstant);
+            Path reportPath = logsPath.resolve("session-" + stamp + ".json");
+
+            String report = formatSessionReport(
+                endInstant,
+                durationSeconds,
+                stats,
+                totalTicks,
+                gcEvents
+            );
+
+            Files.writeString(reportPath, report, StandardCharsets.UTF_8);
+            LOG.info("[CinderServer] Session report written: " + reportPath);
+        } catch (IOException e) {
+            LOG.log(Level.WARNING, "[CinderServer] Failed to write session report.", e);
+        }
+    }
+
+    private String formatSessionReport(
+            Instant endInstant,
+            double durationSeconds,
+            RollingStats stats,
+            long totalTicks,
+            long gcEvents
+    ) {
+        return String.format(Locale.ROOT,
+            "{%n" +
+            "  \"preset\": \"%s\",%n" +
+            "  \"startedAtUtc\": \"%s\",%n" +
+            "  \"endedAtUtc\": \"%s\",%n" +
+            "  \"durationSeconds\": %.3f,%n" +
+            "  \"meanMspt\": %.3f,%n" +
+            "  \"p99Mspt\": %.3f,%n" +
+            "  \"peakPlayers\": %d,%n" +
+            "  \"totalTicks\": %d,%n" +
+            "  \"gcEventCount\": %d%n" +
+            "}%n",
+            jsonEscape(presetName),
+            startInstant,
+            endInstant,
+            durationSeconds,
+            stats.meanMspt,
+            stats.p99Mspt,
+            peakPlayerCount,
+            totalTicks,
+            gcEvents
+        );
     }
 
     // ── Accessors ─────────────────────────────────────────────────────────
@@ -323,7 +649,51 @@ public final class CinderServer {
         }
     }
 
+    private record RuntimeTargets(
+        int chunkCacheSize,
+        int deferredIntervalTicks,
+        int simulationDistance,
+        int saveIntervalTicks
+    ) {
+        static RuntimeTargets of(
+                int chunkCacheSize,
+                int deferredIntervalTicks,
+                int simulationDistance,
+                int saveIntervalTicks
+        ) {
+            int cache = Math.max(16, chunkCacheSize);
+            int deferred = Math.max(1, deferredIntervalTicks);
+            int simulation = Math.max(2, Math.min(simulationDistance, 32));
+            int saveInterval = Math.max(0, saveIntervalTicks);
+            return new RuntimeTargets(cache, deferred, simulation, saveInterval);
+        }
+
+        RuntimeTargets withDeferredInterval(int intervalTicks) {
+            return of(chunkCacheSize, intervalTicks, simulationDistance, saveIntervalTicks);
+        }
+
+        RuntimeTargets withSimulationDistance(int newSimulationDistance) {
+            return of(chunkCacheSize, deferredIntervalTicks, newSimulationDistance, saveIntervalTicks);
+        }
+    }
+
     // ── Utilities ─────────────────────────────────────────────────────────
+
+    private static boolean boolProperty(String key, boolean defaultValue) {
+        String val = System.getProperty(key);
+        if (val == null) return defaultValue;
+
+        if ("true".equalsIgnoreCase(val) || "1".equals(val) || "yes".equalsIgnoreCase(val)) {
+            return true;
+        }
+        if ("false".equalsIgnoreCase(val) || "0".equals(val) || "no".equalsIgnoreCase(val)) {
+            return false;
+        }
+
+        LOG.warning("[CinderServer] Invalid boolean for " + key + "='" + val
+            + "', using default=" + defaultValue);
+        return defaultValue;
+    }
 
     private static int intProperty(String key, int defaultValue) {
         String val = System.getProperty(key);
@@ -335,6 +705,36 @@ public final class CinderServer {
                 + "', using default=" + defaultValue);
             return defaultValue;
         }
+    }
+
+    private static int intProperty(Properties props, String key, int defaultValue) {
+        String val = props.getProperty(key);
+        if (val == null) return defaultValue;
+        try {
+            return Integer.parseInt(val.trim());
+        } catch (NumberFormatException e) {
+            LOG.warning("[CinderServer] Invalid runtime config value for " + key + "='" + val
+                + "', using default=" + defaultValue);
+            return defaultValue;
+        }
+    }
+
+    private static String jsonEscape(String value) {
+        if (value == null) {
+            return "";
+        }
+        return value.replace("\\", "\\\\").replace("\"", "\\\"");
+    }
+
+    private static long getGcEventCount() {
+        long total = 0L;
+        for (GarbageCollectorMXBean bean : ManagementFactory.getGarbageCollectorMXBeans()) {
+            long count = bean.getCollectionCount();
+            if (count > 0) {
+                total += count;
+            }
+        }
+        return total;
     }
 
     // ── Entry point ───────────────────────────────────────────────────────

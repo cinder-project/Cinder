@@ -72,7 +72,7 @@ public final class EntityUpdatePipeline {
     private static final long BUDGET_DEFERRED_NS  =  3_000_000L;
 
     /** Deferred entities update once every this many ticks. */
-    private static final int DEFERRED_TICK_INTERVAL = 4;
+    private static final int DEFAULT_DEFERRED_TICK_INTERVAL = 4;
 
     // ── Entity registries ──────────────────────────────────────────────────
 
@@ -95,6 +95,7 @@ public final class EntityUpdatePipeline {
      */
     private final List<CinderEntity> deferredEntities = new ArrayList<>(512);
     private int deferredOffset = 0;
+    private volatile int deferredTickInterval = DEFAULT_DEFERRED_TICK_INTERVAL;
 
     // ── Removal queue ──────────────────────────────────────────────────────
     // Entities are not removed mid-iteration. Instead, they're queued here
@@ -324,7 +325,8 @@ public final class EntityUpdatePipeline {
         long start = System.nanoTime();
 
         int size = deferredEntities.size();
-        int sliceSize = (int) Math.ceil((double) size / DEFERRED_TICK_INTERVAL);
+        int interval = Math.max(1, deferredTickInterval);
+        int sliceSize = (int) Math.ceil((double) size / interval);
 
         int from = deferredOffset % size;
         int to   = Math.min(from + sliceSize, size);
@@ -439,6 +441,25 @@ public final class EntityUpdatePipeline {
             lastStandardNs,
             lastDeferredNs
         );
+    }
+
+    /** Returns the current deferred-tier update interval in ticks. */
+    public int getDeferredTickInterval() {
+        return deferredTickInterval;
+    }
+
+    /**
+     * Updates the deferred-tier cadence at runtime.
+     * Must be called on the tick thread.
+     */
+    public void setDeferredTickInterval(int intervalTicks) {
+        int normalized = Math.max(1, intervalTicks);
+        if (normalized == deferredTickInterval) {
+            return;
+        }
+        int old = deferredTickInterval;
+        deferredTickInterval = normalized;
+        LOG.info("[EntityPipeline] Deferred interval updated: " + old + " -> " + normalized);
     }
 
     /** Shuts down the async worker pool. Call during server shutdown. */

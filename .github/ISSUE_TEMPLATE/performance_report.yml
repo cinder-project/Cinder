@@ -1,0 +1,42 @@
+name: Performance Report
+description: Submit benchmark or runtime performance results.
+title: "[Performance]: "
+labels:
+  - performance
+body:
+  - type: input
+    id: hardware
+    attributes:
+      label: Hardware
+      placeholder: Raspberry Pi 4 8GB
+    validations:
+      required: true
+  - type: input
+    id: preset
+    attributes:
+      label: Preset
+      placeholder: survival
+    validations:
+      required: true
+  - type: input
+    id: scenario
+    attributes:
+      label: Benchmark Scenario
+      placeholder: entity-stress 200 standard
+    validations:
+      required: true
+  - type: textarea
+    id: metrics
+    attributes:
+      label: Key Metrics
+      description: Include mean/p95/p99 MSPT and TPS.
+      placeholder: meanMspt=..., p99Mspt=..., tps=...
+    validations:
+      required: true
+  - type: textarea
+    id: attachment
+    attributes:
+      label: Attach Result JSON
+      description: Paste benchmark output JSON or a link.
+    validations:
+      required: true

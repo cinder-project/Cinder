@@ -2,6 +2,7 @@ package dev.cinder.network;
 
 import dev.cinder.chunk.ChunkPosition;
 import dev.cinder.entity.PlayerEntity;
+import dev.cinder.world.FlatWorldGenerator;
 import org.junit.jupiter.api.Test;
 
 import java.nio.ByteBuffer;
@@ -253,6 +254,12 @@ class PacketCodecTest {
         ChunkPosition center = ChunkPosition.of(0, 0);
         Set<ChunkPosition> view = PlayerEntity.chunksInView(center, 32);
         assertEquals(65 * 65, view.size());
+    }
+
+    @Test
+    void playerEntity_defaultSpawnY_isOneBlockAboveFlatSurface() {
+        PlayerEntity player = new PlayerEntity(null, null);
+        assertEquals(FlatWorldGenerator.SURFACE_Y + 1.0, player.getY(), 1e-9);
     }
 
     // -------------------------------------------------------------------------

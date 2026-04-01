@@ -53,12 +53,14 @@ IFS=$'\n\t'
 : "${LAUNCH_META:="${CINDER_LOG_DIR}/last-launch.json"}"
 : "${HEALTH_CHECK:="${CINDER_BASE_DIR}/scripts/health-check.sh"}"
 : "${PID_FILE:="${CINDER_LOG_DIR}/cinder.pid"}"
+: "${CINDER_AGGREGATE_FILE:="${CINDER_BASE_DIR}/metrics/aggregate-latest.json"}"
 
 # ── Argument parsing ──────────────────────────────────────────────────────────
 
 OPT_INTERVAL=2
 OPT_NO_HEALTH=false
 OPT_COMPACT=false
+OPT_AGGREGATE_FILE=""
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -66,12 +68,17 @@ while [[ $# -gt 0 ]]; do
         --no-health) OPT_NO_HEALTH=true; shift ;;
         --compact)   OPT_COMPACT=true;  shift ;;
         --log)       SERVER_LOG="$2";   shift 2 ;;
+        --aggregate-file) OPT_AGGREGATE_FILE="$2"; shift 2 ;;
         -h|--help)
             grep '^#' "$0" | head -40 | sed 's/^# \{0,1\}//'
             exit 0 ;;
         *) echo "Unknown argument: $1" >&2; exit 1 ;;
     esac
 done
+
+if [[ -z "${OPT_AGGREGATE_FILE}" ]]; then
+    OPT_AGGREGATE_FILE="${CINDER_AGGREGATE_FILE}"
+fi
 
 # ── Terminal setup ────────────────────────────────────────────────────────────
 
@@ -182,6 +189,7 @@ PHASE_ENTITY="--"
 PHASE_CHUNK="--"
 PHASE_POST="--"
 HEALTH_SUMMARY="--"
+AGGREGATE_SUMMARY="--"
 declare -a RECENT_SPIKES=()
 
 # ── Data collection ───────────────────────────────────────────────────────────
@@ -290,6 +298,26 @@ collect_health() {
     fi
 }
 
+collect_aggregate() {
+    if [[ -z "${OPT_AGGREGATE_FILE}" || ! -f "${OPT_AGGREGATE_FILE}" ]]; then
+        AGGREGATE_SUMMARY="disabled"
+        return
+    fi
+
+    if ! command -v jq &>/dev/null; then
+        AGGREGATE_SUMMARY="jq required"
+        return
+    fi
+
+    AGGREGATE_SUMMARY="$(jq -r '
+        "nodes=" + ((.nodes | length) | tostring)
+        + " alive=" + ((.totals.aliveNodes // 0) | tostring)
+        + " players=" + ((.totals.totalPlayers // 0) | tostring)
+        + " avgTPS=" + ((.totals.avgTps // 0) | tostring)
+        + " worstMSPT=" + ((.totals.worstMspt // 0) | tostring)
+    ' "${OPT_AGGREGATE_FILE}" 2>/dev/null || echo "invalid aggregate data")"
+}
+
 # ── Rendering ─────────────────────────────────────────────────────────────────
 
 TERM_COLS=80
@@ -375,6 +403,10 @@ render_dashboard() {
 
     printf "  ${BOLD}Health${RST}  ${health_col}%s${RST}\n" "${HEALTH_SUMMARY}"
 
+    if [[ "${AGGREGATE_SUMMARY}" != "disabled" ]]; then
+        printf "  ${BOLD}Cluster${RST}  ${C}%s${RST}\n" "${AGGREGATE_SUMMARY}"
+    fi
+
     echo -e "${DIM}${sep}${RST}"
 
     # ── Recent spikes ─────────────────────────────────────────────────────
@@ -429,6 +461,7 @@ while true; do
     collect_tick_data
     collect_system_metrics
     collect_pid_info
+    collect_aggregate
 
     # Run health check every 10 refresh cycles (~20s default) to reduce overhead
     static_health_counter="${static_health_counter:-0}"
