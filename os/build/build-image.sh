@@ -5,8 +5,11 @@
 #
 # Overview:
 #   This script produces a bootable Cinder OS .img file that can be written
-#   to a microSD card or USB drive. The image is a minimal Debian bookworm
-#   ARM64 system pre-configured for Cinder Core hosting.
+#   to a microSD card or USB drive.
+#
+#   Profiles:
+#     - desktop: full GUI host OS with desktop tools for content import
+#     - server:  headless host OS tuned for dedicated deployments
 #
 #   Build host requirements:
 #     - Debian or Ubuntu x86_64 (or ARM64 natively on another Pi)
@@ -36,8 +39,8 @@
 #
 #   Usage:
 #     sudo ./build-image.sh [--version <ver>] [--output-dir <dir>]
-#                           [--image-size <gb>] [--skip-compress]
-#                           [--cinder-branch <branch>]
+#                           [--image-size <gb>] [--profile <desktop|server>]
+#                           [--skip-compress] [--cinder-branch <branch>]
 #
 # =============================================================================
 
@@ -59,6 +62,7 @@ readonly BUILD_DATE="$(date -u +%Y%m%d)"
 : "${BUILD_WORK_DIR:="${SCRIPT_DIR}/work"}"
 : "${IMAGE_SIZE_GB:=8}"
 : "${SKIP_COMPRESS:=false}"
+: "${CINDER_OS_PROFILE:="desktop"}"
 : "${CINDER_BRANCH:="main"}"
 : "${CINDER_DEFAULT_PRESET:="survival"}"
 : "${CINDER_DEFAULT_PASSWORD:="cinderpi"}"  # Changed on first boot
@@ -73,6 +77,7 @@ while [[ $# -gt 0 ]]; do
         --version)        CINDER_OS_VERSION="$2"; shift 2 ;;
         --output-dir)     OUTPUT_DIR="$2";        shift 2 ;;
         --image-size)     IMAGE_SIZE_GB="$2";     shift 2 ;;
+        --profile)        CINDER_OS_PROFILE="$2"; shift 2 ;;
         --skip-compress)  SKIP_COMPRESS=true;     shift   ;;
         --cinder-branch)  CINDER_BRANCH="$2";     shift 2 ;;
         --password)       CINDER_DEFAULT_PASSWORD="$2"; shift 2 ;;
@@ -82,6 +87,20 @@ while [[ $# -gt 0 ]]; do
         *) echo "[build] Unknown argument: $1" >&2; exit 1 ;;
     esac
 done
+
+case "${CINDER_OS_PROFILE}" in
+    server|desktop) ;;
+    *) echo "[build] Invalid --profile value: ${CINDER_OS_PROFILE} (expected: server|desktop)" >&2; exit 1 ;;
+esac
+
+if [[ ! "${IMAGE_SIZE_GB}" =~ ^[0-9]+$ ]]; then
+    echo "[build] --image-size must be an integer in GB (got: ${IMAGE_SIZE_GB})" >&2
+    exit 1
+fi
+
+if [[ "${CINDER_OS_PROFILE}" == "desktop" && "${IMAGE_SIZE_GB}" -lt 8 ]]; then
+    warn "Desktop profile is recommended at 8GB+ image size. Current size: ${IMAGE_SIZE_GB}GB"
+fi
 
 # Derived paths must be resolved after argument parsing.
 IMAGE_NAME="cinder-os-${CINDER_OS_VERSION}-${BUILD_DATE}"
@@ -103,6 +122,7 @@ step() { echo ""; log "═══════════════════
 log "Cinder OS build starting — version ${CINDER_OS_VERSION}, date ${BUILD_DATE}"
 log "Image: ${IMAGE_FILE}"
 log "Debian: ${DEBIAN_RELEASE} from ${DEBIAN_MIRROR}"
+log "Profile: ${CINDER_OS_PROFILE}"
 
 # ── Privilege check ───────────────────────────────────────────────────────────
 
@@ -286,24 +306,31 @@ log "Base system configuration complete."
 
 # ── Step 7: Install packages ──────────────────────────────────────────────────
 
+parse_package_manifest() {
+    local manifest_path="$1"
+    local out_var_name="$2"
+
+    if [[ ! -f "${manifest_path}" ]]; then
+        die "Package manifest not found: ${manifest_path}"
+    fi
+
+    local -n out_ref="${out_var_name}"
+    out_ref=()
+
+    while IFS= read -r line; do
+        local pkg
+        pkg="$(echo "${line}" | sed 's/#.*//' | xargs)"
+        [[ -z "${pkg}" ]] && continue
+        [[ "${pkg}" =~ ^(EXCLUDE|BUILD_ONLY|SECTION): ]] && continue
+        out_ref+=("${pkg}")
+    done < "${manifest_path}"
+}
+
 step "Step 7: Installing packages from packages.list..."
 
-# Parse packages.list: extract non-comment, non-empty package names
 PACKAGES_LIST="${SCRIPT_DIR}/packages.list"
-if [[ ! -f "${PACKAGES_LIST}" ]]; then
-    die "packages.list not found: ${PACKAGES_LIST}"
-fi
-
-# Extract real package names (ignore comments, EXCLUDE lines, BUILD_ONLY lines)
 PACKAGES=()
-while IFS= read -r line; do
-    # Strip inline comments and whitespace
-    pkg="$(echo "${line}" | sed 's/#.*//' | xargs)"
-    # Skip empty, EXCLUDE, BUILD_ONLY lines
-    [[ -z "${pkg}" ]] && continue
-    [[ "${pkg}" =~ ^(EXCLUDE|BUILD_ONLY|SECTION): ]] && continue
-    PACKAGES+=("${pkg}")
-done < "${PACKAGES_LIST}"
+parse_package_manifest "${PACKAGES_LIST}" PACKAGES
 
 log "Installing ${#PACKAGES[@]} packages..."
 
@@ -316,6 +343,26 @@ chroot "${ROOTFS_DIR}" bash -c "
 " >> "${BUILD_LOG}" 2>&1
 
 log "Package installation complete."
+
+if [[ "${CINDER_OS_PROFILE}" == "desktop" ]]; then
+    step "Step 7a: Installing desktop GUI profile packages..."
+
+    DESKTOP_PACKAGES_LIST="${SCRIPT_DIR}/packages-desktop.list"
+    DESKTOP_PACKAGES=()
+    parse_package_manifest "${DESKTOP_PACKAGES_LIST}" DESKTOP_PACKAGES
+
+    log "Installing ${#DESKTOP_PACKAGES[@]} desktop packages..."
+
+    chroot "${ROOTFS_DIR}" bash -c "
+        export DEBIAN_FRONTEND=noninteractive
+        apt-get update -qq
+        apt-get install -y ${DESKTOP_PACKAGES[*]}
+        apt-get clean
+        rm -rf /var/lib/apt/lists/*
+    " >> "${BUILD_LOG}" 2>&1
+
+    log "Desktop GUI package installation complete."
+fi
 
 step "Step 7b: Configuring locale and timezone..."
 
@@ -348,7 +395,7 @@ step "Step 8: Installing Cinder OS files..."
 
 # Create Cinder directory structure
 chroot "${ROOTFS_DIR}" bash -c "
-    mkdir -p /opt/cinder/{world,logs,backups,staging,plugins,mods,config}
+    mkdir -p /opt/cinder/{world,logs,backups,staging,plugins,mods,config,resourcepacks,downloads}
     mkdir -p /opt/cinder/cinder-runtime/presets
     mkdir -p /opt/cinder/cinder-runtime/launch
     mkdir -p /opt/cinder/cinder-control/{services,monitoring}
@@ -392,19 +439,85 @@ cp "${CINDER_REPO_ROOT}/cinder-control/monitoring/metrics-display.sh" \
 cp "${CINDER_REPO_ROOT}/os/services/cinder.service" \
     "${ROOTFS_DIR}/etc/systemd/system/cinder.service"
 
+if [[ "${CINDER_OS_PROFILE}" == "desktop" ]]; then
+    step "Step 8b: Configuring desktop import tooling..."
+
+    mkdir -p "${ROOTFS_DIR}/usr/local/bin" "${ROOTFS_DIR}/usr/share/applications"
+
+    cat > "${ROOTFS_DIR}/usr/local/bin/cinder-online-import" <<-'EOF'
+    #!/usr/bin/env bash
+    exec /opt/cinder/scripts/cinder-online-import.sh "$@"
+    EOF
+
+    cat > "${ROOTFS_DIR}/usr/local/bin/cinder-usb-import" <<-'EOF'
+    #!/usr/bin/env bash
+    exec /opt/cinder/scripts/usb-import.sh "$@"
+    EOF
+
+    chmod 755 \
+      "${ROOTFS_DIR}/usr/local/bin/cinder-online-import" \
+      "${ROOTFS_DIR}/usr/local/bin/cinder-usb-import"
+
+    cat > "${ROOTFS_DIR}/usr/share/applications/cinder-online-import.desktop" <<-'EOF'
+    [Desktop Entry]
+    Version=1.0
+    Type=Application
+    Name=Cinder Online Import
+    Comment=Download mods, plugins, or packs from a URL into Cinder directories
+    Exec=/opt/cinder/scripts/cinder-online-import.sh --interactive
+    Icon=system-software-install
+    Terminal=false
+    Categories=Game;Network;Utility;
+    EOF
+
+    cat > "${ROOTFS_DIR}/usr/share/applications/cinder-usb-import.desktop" <<-'EOF'
+    [Desktop Entry]
+    Version=1.0
+    Type=Application
+    Name=Cinder USB Import
+    Comment=Import mods, plugins, and packs from a USB drive
+    Exec=x-terminal-emulator -e /bin/bash -lc 'sudo /opt/cinder/scripts/usb-import.sh'
+    Icon=drive-removable-media
+    Terminal=false
+    Categories=Game;Utility;
+    EOF
+
+    chmod 644 \
+      "${ROOTFS_DIR}/usr/share/applications/cinder-online-import.desktop" \
+      "${ROOTFS_DIR}/usr/share/applications/cinder-usb-import.desktop"
+
+    log "Desktop import tooling configured."
+fi
+
 # ── Step 9: Create cinder user ────────────────────────────────────────────────
 
 step "Step 9: Creating cinder user..."
 
-chroot "${ROOTFS_DIR}" bash -c "
-    useradd -r -m -d /opt/cinder -s /bin/bash -u 1001 -g 1001 --create-group cinder 2>/dev/null || true
-    echo 'cinder:${CINDER_DEFAULT_PASSWORD}' | chpasswd
-    usermod -aG sudo cinder
-    chown -R cinder:cinder /opt/cinder
-    chmod 750 /opt/cinder
-    # Make scripts executable
-    find /opt/cinder -name '*.sh' -exec chmod 750 {} \;
-" >> "${BUILD_LOG}" 2>&1
+if [[ "${CINDER_OS_PROFILE}" == "desktop" ]]; then
+    chroot "${ROOTFS_DIR}" bash -c "
+        if ! id -u cinder >/dev/null 2>&1; then
+            useradd -m -s /bin/bash -u 1001 -g 1001 --create-group cinder
+        fi
+        echo 'cinder:${CINDER_DEFAULT_PASSWORD}' | chpasswd
+        usermod -aG sudo,audio,video,plugdev,netdev,render,input cinder
+        chown -R cinder:cinder /opt/cinder
+        chmod 750 /opt/cinder
+        # Make scripts executable
+        find /opt/cinder -name '*.sh' -exec chmod 750 {} \;
+    " >> "${BUILD_LOG}" 2>&1
+else
+    chroot "${ROOTFS_DIR}" bash -c "
+        if ! id -u cinder >/dev/null 2>&1; then
+            useradd -r -m -d /opt/cinder -s /bin/bash -u 1001 -g 1001 --create-group cinder
+        fi
+        echo 'cinder:${CINDER_DEFAULT_PASSWORD}' | chpasswd
+        usermod -aG sudo cinder
+        chown -R cinder:cinder /opt/cinder
+        chmod 750 /opt/cinder
+        # Make scripts executable
+        find /opt/cinder -name '*.sh' -exec chmod 750 {} \;
+    " >> "${BUILD_LOG}" 2>&1
+fi
 
 log "Created 'cinder' user (UID 1001)."
 
@@ -416,10 +529,8 @@ chroot "${ROOTFS_DIR}" bash -c "
     # Enable Cinder services
     systemctl enable cinder.service
 
-    # Disable services that are unnecessary or counterproductive
+    # Disable periodic apt jobs to avoid random workload spikes
     systemctl disable apt-daily.timer apt-daily-upgrade.timer  # Avoid updates during server operation
-    systemctl disable bluetooth.target                          # No Bluetooth
-    systemctl disable ModemManager.service 2>/dev/null || true  # No modem
 
     # Reduce journald storage to protect SD card
     mkdir -p /etc/systemd/journald.conf.d
@@ -440,6 +551,18 @@ DefaultTimeoutStopSec=30s
 DefaultTimeoutStartSec=60s
 EOF
 " >> "${BUILD_LOG}" 2>&1
+
+if [[ "${CINDER_OS_PROFILE}" == "desktop" ]]; then
+    chroot "${ROOTFS_DIR}" bash -c "
+        systemctl enable NetworkManager.service 2>/dev/null || true
+        systemctl enable lightdm.service 2>/dev/null || true
+    " >> "${BUILD_LOG}" 2>&1
+else
+    chroot "${ROOTFS_DIR}" bash -c "
+        systemctl disable bluetooth.target 2>/dev/null || true
+        systemctl disable ModemManager.service 2>/dev/null || true
+    " >> "${BUILD_LOG}" 2>&1
+fi
 
 # ── Step 11: SSH configuration ────────────────────────────────────────────────
 
@@ -467,6 +590,16 @@ log "SSH hardening applied."
 
 step "Step 12: Writing Raspberry Pi 4 boot configuration..."
 
+if [[ "${CINDER_OS_PROFILE}" == "desktop" ]]; then
+    GPU_MEM_MB=192
+    HDMI_FORCE_HOTPLUG=1
+    RADIO_CONFIG=$'\t# Keep WiFi and Bluetooth enabled for desktop profile\n\t# (do not apply disable-wifi/disable-bt overlays)'
+else
+    GPU_MEM_MB=16
+    HDMI_FORCE_HOTPLUG=0
+    RADIO_CONFIG=$'\t# Disable on-board WiFi and Bluetooth (server deployments use Ethernet)\n\tdtoverlay=disable-wifi\n\tdtoverlay=disable-bt'
+fi
+
 # config.txt for Pi 4
 cat > "${ROOTFS_DIR}/boot/firmware/config.txt" <<-EOF
 	# Cinder OS — Raspberry Pi 4 boot configuration
@@ -476,12 +609,10 @@ cat > "${ROOTFS_DIR}/boot/firmware/config.txt" <<-EOF
 	# ARM64 kernel
 	arm_64bit=1
 
-	# GPU memory: minimal — Cinder OS is headless
-	gpu_mem=16
+    # GPU memory profile
+    gpu_mem=${GPU_MEM_MB}
 
-	# Disable on-board WiFi and Bluetooth (server deployments use Ethernet)
-	dtoverlay=disable-wifi
-	dtoverlay=disable-bt
+${RADIO_CONFIG}
 
 	# Enable UART for serial console access (useful for headless debugging)
 	enable_uart=1
@@ -500,7 +631,7 @@ cat > "${ROOTFS_DIR}/boot/firmware/config.txt" <<-EOF
 	disable_splash=1
 
 	# Force HDMI hot-plug (allows display attachment without reboot, if needed)
-	hdmi_force_hotplug=0
+    hdmi_force_hotplug=${HDMI_FORCE_HOTPLUG}
 
 	[all]
 	# Additional UART configuration

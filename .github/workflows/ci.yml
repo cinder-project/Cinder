@@ -151,7 +151,8 @@ jobs:
           sudo ./os/build/build-image.sh \
             --version "${{ needs.build.outputs.version }}" \
             --output-dir "./os/build/output" \
-            --image-size 4
+            --image-size 8 \
+            --profile desktop
 
       - name: Normalize OS artifact ownership
         run: |
