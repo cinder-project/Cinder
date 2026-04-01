@@ -605,13 +605,14 @@ step "Step 15: Unmounting filesystems..."
 sync
 
 # Unmount in reverse order
-for mnt in "${MOUNTED_DIRS[@]}"; do
+for (( idx=${#MOUNTED_DIRS[@]}-1; idx>=0; idx-- )); do
+    mnt="${MOUNTED_DIRS[idx]}"
     umount "${mnt}" 2>>"${BUILD_LOG}" || warn "Could not unmount ${mnt}"
 done
 MOUNTED_DIRS=()
 
-kpartx -d "${LOOP_DEV}" >> "${BUILD_LOG}" 2>&1
-losetup -d "${LOOP_DEV}" >> "${BUILD_LOG}" 2>&1
+kpartx -d "${LOOP_DEV}" >> "${BUILD_LOG}" 2>&1 || die "Failed to detach partition mappings from ${LOOP_DEV}"
+losetup -d "${LOOP_DEV}" >> "${BUILD_LOG}" 2>&1 || die "Failed to detach loop device ${LOOP_DEV}"
 LOOP_DEV=""
 
 log "All filesystems unmounted and loop devices released."
