@@ -153,6 +153,11 @@ jobs:
             --output-dir "./os/build/output" \
             --image-size 4
 
+      - name: Normalize OS artifact ownership
+        run: |
+          sudo chown -R "$(id -u):$(id -g)" ./os/build/output
+          chmod -R u+rwX ./os/build/output
+
       - name: Build ISO bundle
         run: |
           ./os/build/create-release-iso.sh \
