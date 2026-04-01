@@ -239,9 +239,17 @@ log "Debootstrap complete."
 step "Step 6: Configuring base system..."
 
 # Mount essential pseudo-filesystems for chroot operations
-mount --bind /dev  "${ROOTFS_DIR}/dev"  && MOUNTED_DIRS+=("${ROOTFS_DIR}/dev")
-mount --bind /proc "${ROOTFS_DIR}/proc" && MOUNTED_DIRS+=("${ROOTFS_DIR}/proc")
-mount --bind /sys  "${ROOTFS_DIR}/sys"  && MOUNTED_DIRS+=("${ROOTFS_DIR}/sys")
+mount_and_track_bind() {
+    local source="$1"
+    local target="$2"
+
+    mount --bind "${source}" "${target}" || die "Failed to mount ${source} on ${target}"
+    MOUNTED_DIRS+=("${target}")
+}
+
+mount_and_track_bind /dev "${ROOTFS_DIR}/dev"
+mount_and_track_bind /proc "${ROOTFS_DIR}/proc"
+mount_and_track_bind /sys "${ROOTFS_DIR}/sys"
 
 # APT sources
 cat > "${ROOTFS_DIR}/etc/apt/sources.list" <<-EOF
@@ -330,6 +338,8 @@ chroot "${ROOTFS_DIR}" bash -c "
     mkdir -p /opt/cinder/{world,logs,backups,staging,plugins,mods,config}
     mkdir -p /opt/cinder/cinder-runtime/presets
     mkdir -p /opt/cinder/cinder-runtime/launch
+    mkdir -p /opt/cinder/cinder-control/{services,monitoring}
+    mkdir -p /opt/cinder/metrics
     mkdir -p /opt/cinder/scripts
 " >> "${BUILD_LOG}" 2>&1
 
@@ -345,9 +355,25 @@ rsync -a --exclude='.git' \
     >> "${BUILD_LOG}" 2>&1
 
 rsync -a --exclude='.git' \
-    "${CINDER_REPO_ROOT}/scripts/" \
+    "${CINDER_REPO_ROOT}/os/scripts/" \
     "${ROOTFS_DIR}/opt/cinder/scripts/" \
     >> "${BUILD_LOG}" 2>&1
+
+rsync -a --exclude='.git' \
+    "${CINDER_REPO_ROOT}/cinder-control/services/" \
+    "${ROOTFS_DIR}/opt/cinder/cinder-control/services/" \
+    >> "${BUILD_LOG}" 2>&1
+
+rsync -a --exclude='.git' \
+    "${CINDER_REPO_ROOT}/cinder-control/monitoring/" \
+    "${ROOTFS_DIR}/opt/cinder/cinder-control/monitoring/" \
+    >> "${BUILD_LOG}" 2>&1
+
+# Compatibility entry points expected by existing operator docs.
+cp "${CINDER_REPO_ROOT}/cinder-control/services/health-check.sh" \
+   "${ROOTFS_DIR}/opt/cinder/scripts/health-check.sh"
+cp "${CINDER_REPO_ROOT}/cinder-control/monitoring/metrics-display.sh" \
+   "${ROOTFS_DIR}/opt/cinder/scripts/metrics-display.sh"
 
 # Install systemd service files
 cp "${CINDER_REPO_ROOT}/os/services/cinder.service" \
