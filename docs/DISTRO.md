@@ -23,7 +23,10 @@ This document covers everything an operator needs to build, deploy, administer, 
 
 ## 1. What Cinder OS Is
 
-Cinder OS is a minimal Debian bookworm ARM64 image built for one purpose: running Cinder Core on Raspberry Pi 4 and Pi 400 hardware. It is not a general-purpose Linux distribution. It does not include a desktop environment, a package manager configured for general use, or any services that are not required for Minecraft hosting.
+Cinder OS is a Debian bookworm ARM64 image for Raspberry Pi 4/Pi 400 Minecraft hosting with two build profiles:
+
+- `desktop` (default): full GUI host OS with desktop network/device management and mod/pack import launchers.
+- `server`: headless profile tuned for dedicated unattended deployments.
 
 What it does include:
 
@@ -38,8 +41,11 @@ What it does include:
 - SSH with hardened defaults
 - `nftables` firewall
 - `fail2ban` for SSH brute-force protection
+- Optional desktop profile packages (`xfce4`, `lightdm`, `firefox-esr`, removable-media UX stack)
+- Online mod/pack import helper (`cinder-online-import.sh`) and USB import helper launcher
 
-What it does not include: X11, desktop environments, WiFi daemons, Bluetooth, a web server, Docker, or any development tools. The installed package set is defined in `os/build/packages.list` and every package has a documented reason for being there.
+The base package set is defined in `os/build/packages.list`.
+Desktop profile additions are defined in `os/build/packages-desktop.list`.
 
 ---
 
@@ -72,6 +78,7 @@ sudo ./os/build/build-image.sh \
     --version 0.1.0 \
     --output-dir /tmp/cinder-images \
     --image-size 16 \
+    --profile server \
     --cinder-branch main
 ```
 
@@ -81,7 +88,8 @@ Build options:
 |---|---|---|
 | `--version <ver>` | `0.1.0-dev` | Version string embedded in the image name |
 | `--output-dir <dir>` | `os/build/output/` | Where the finished image is written |
-| `--image-size <gb>` | `8` | Image size in GB (minimum 6) |
+| `--image-size <gb>` | `8` | Image size in GB (desktop: recommended 8+, server: recommended 6+) |
+| `--profile <desktop\|server>` | `desktop` | Select full GUI profile or headless server profile |
 | `--skip-compress` | false | Skip xz compression (faster build, larger output) |
 | `--cinder-branch <branch>` | `main` | Git branch to pull Cinder files from |
 | `--password <pw>` | `cinderpi` | Default password for the `cinder` user (change on first boot) |

@@ -1,0 +1,41 @@
+# =============================================================================
+# Cinder OS — packages-desktop.list
+# Desktop profile package manifest (applied on top of packages.list)
+#
+# Purpose:
+#   Provide a full GUI operating system experience while keeping Cinder's
+#   server-hosting stack intact. This manifest is only installed when
+#   --profile desktop is used.
+# =============================================================================
+
+# SECTION: Display stack
+xserver-xorg                # X.org display server
+xinit                       # xinit/startx compatibility
+lightdm                     # Display manager
+
+# SECTION: Desktop environment (XFCE)
+xfce4                       # Core XFCE desktop
+xfce4-goodies               # Panel/plugins and quality-of-life desktop tools
+xfce4-terminal              # Terminal emulator
+mousepad                    # Lightweight GUI text editor
+
+# SECTION: Network and device UX
+network-manager             # Desktop network management backend
+network-manager-gnome       # nm-applet and GUI controls
+policykit-1                 # Desktop privilege mediation
+gvfs                        # Virtual filesystem support for desktop apps
+gvfs-backends               # SMB/MTP/etc backends
+udisks2                     # Removable storage integration
+
+# SECTION: File/archive tooling
+thunar                      # XFCE file manager
+thunar-archive-plugin       # Archive actions in file manager
+file-roller                 # GUI archive manager
+p7zip-full                  # 7z archive support
+zip                         # Zip creation
+unzip                       # Zip extraction
+
+# SECTION: Web + GUI helpers
+firefox-esr                 # Browser for downloading mods/packs and docs
+zenity                      # GUI dialogs used by Cinder import helper
+xdg-utils                   # Open URLs/files with desktop defaults
