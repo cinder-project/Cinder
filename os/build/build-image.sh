@@ -445,6 +445,8 @@ EOF
 
 step "Step 11: Configuring SSH..."
 
+mkdir -p "${ROOTFS_DIR}/etc/ssh/sshd_config.d"
+
 cat > "${ROOTFS_DIR}/etc/ssh/sshd_config.d/cinder-hardening.conf" <<-EOF
 	# Cinder OS SSH hardening
 	PermitRootLogin no
