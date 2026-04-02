@@ -308,6 +308,8 @@ parse_package_manifest() {
             # Keep compatibility with legacy manifests that used non-Debian names.
             if (pkg == "shadow") return "passwd"
             if (pkg == "schedutils") return "util-linux"
+            # Bookworm uses raspi-utils; legacy libraspberrypi packages conflict with it.
+            if (pkg == "libraspberrypi-bin" || pkg == "libraspberrypi0") return "raspi-utils"
             return pkg
         }
 

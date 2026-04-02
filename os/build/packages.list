@@ -209,8 +209,6 @@ python3-venv                # Python virtual environments — isolates monitorin
 
 raspi-config                # Pi configuration utility — GPIO, overclock, boot config
 raspi-utils                 # vcgencmd (temperature, throttle status), raspi-gpio
-libraspberrypi-bin          # Provides vcgencmd — used in prestart-check.sh for thermal checks
-libraspberrypi0             # Runtime library for raspi binaries
 firmware-brcm80211          # Broadcom WiFi firmware — included for completeness even though
                             # Cinder OS uses wired Ethernet; avoids udev log noise
 rpi-eeprom                  # Pi 4 EEPROM update tool — for boot order configuration
@@ -219,6 +217,8 @@ i2c-tools                   # I2C bus utilities — useful for hardware monitori
                             # (e.g., temperature sensors, OLED status displays)
 
 # EXCLUDE: xserver-xorg           # No display
+# EXCLUDE: libraspberrypi-bin      # Legacy package; replaced by raspi-utils on bookworm
+# EXCLUDE: libraspberrypi0         # Legacy runtime; conflicts with raspi-utils dependency stack
 # EXCLUDE: raspberrypi-ui-mods    # No desktop
 # EXCLUDE: chromium-browser       # No browser
 # EXCLUDE: pulseaudio             # No audio
