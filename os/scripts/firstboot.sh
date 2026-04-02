@@ -1,489 +1,323 @@
 #!/usr/bin/env bash
 # =============================================================================
-# Cinder OS — firstboot.sh
-# One-shot first-boot provisioning script for Raspberry Pi 4 / Pi 400
-#
-# Managed by: cinder-firstboot.service (Type=oneshot, RemainAfterExit=yes)
-# Install path: /opt/cinder/scripts/firstboot.sh
-#
-# This script runs exactly once on the first power-on after flashing a
-# Cinder OS image. It performs all provisioning that cannot be baked into
-# the image (hostname, SSH keys, user passwords, partition expansion) and
-# leaves the system ready for steady-state operation.
-#
-# On completion it writes /opt/cinder/.firstboot-complete and disables
-# its own systemd unit so it never runs again.
-#
-# Provisioning steps:
-#   1.  Expand root filesystem to fill the SD card / USB drive
-#   2.  Set hostname (from /boot/firmware/cinder-hostname.txt if present)
-#   3.  Regenerate SSH host keys (image ships without host keys)
-#   4.  Create 'cinder' user with locked password (SSH key auth only)
-#   5.  Create 'cinder-admin' user for operator access (sudo, SSH only)
-#   6.  Create /opt/cinder directory structure with correct ownership
-#   7.  Deploy systemd units (enable cinder.service)
-#   8.  Configure nftables firewall (ports 22, 25565)
-#   9.  Configure fail2ban for SSH
-#  10.  Set Pi 4 CPU governor to ondemand (default for non-benchmark presets)
-#  11.  Apply /boot/firmware/config.txt Pi tuning overrides
-#  12.  Write /opt/cinder/logs/firstboot.log with full provisioning record
-#  13.  Mark complete and disable cinder-firstboot.service
-#
-# Operator customisation:
-#   Place these files on the boot FAT32 partition before first boot to
-#   override defaults without modifying the image:
-#
-#     /boot/firmware/cinder-hostname.txt  — desired hostname (one line)
-#     /boot/firmware/cinder-pubkey.txt    — SSH public key for cinder-admin
-#     /boot/firmware/cinder-preset.txt    — default preset name
-#     /boot/firmware/cinder-password.txt  — initial cinder-admin password
-#                                           (plaintext; file is shredded after use)
-#
+# Cinder OS - firstboot.sh
+# One-shot first boot provisioning for flash-and-run Cinder OS images.
 # =============================================================================
 
 set -euo pipefail
 IFS=$'\n\t'
 
-# ── Identity ──────────────────────────────────────────────────────────────────
-
-readonly SCRIPT_VERSION="0.1.0"
-readonly START_TIME="$(date -u +%Y%m%dT%H%M%SZ)"
-readonly BOOT_PART="/boot/firmware"
+readonly START_TS="$(date -u +%Y%m%dT%H%M%SZ)"
+readonly BOOT_DIR="/boot/firmware"
+readonly DATA_DIR="/data"
 readonly CINDER_BASE="/opt/cinder"
-readonly CINDER_USER="cinder"
-readonly CINDER_ADMIN_USER="cinder-admin"
-readonly CINDER_UID=1001
-readonly CINDER_ADMIN_UID=1002
 readonly COMPLETE_MARKER="${CINDER_BASE}/.firstboot-complete"
-readonly LOG_FILE="${CINDER_BASE}/logs/firstboot-${START_TIME}.log"
+readonly PENDING_MARKER="${CINDER_BASE}/.firstboot-pending"
+readonly PRESTART_CHECK_SCRIPT="${CINDER_BASE}/scripts/prestart-check.sh"
 
-# ── Bail immediately if already provisioned ───────────────────────────────────
+: "${CINDER_USER:=cinder}"
+: "${CINDER_ADMIN_USER:=cinder-admin}"
+: "${CINDER_UID:=1001}"
+: "${CINDER_ADMIN_UID:=1002}"
 
-if [[ -f "${COMPLETE_MARKER}" ]]; then
-    echo "[firstboot] Already provisioned (${COMPLETE_MARKER} exists). Exiting."
-    exit 0
-fi
+LOG_DIR="${DATA_DIR}/logs"
+LOG_FILE=""
 
-# ── Logging ───────────────────────────────────────────────────────────────────
+_log()  { echo "[firstboot] $(date -u +%H:%M:%SZ)  $*"; }
+_pass() { _log "OK      $*"; }
+_warn() { _log "WARN    $*"; }
+_fail() { _log "FAIL    $*" >&2; exit 1; }
 
-mkdir -p "${CINDER_BASE}/logs"
-exec > >(tee -a "${LOG_FILE}") 2>&1
+_step() {
+    echo
+    _log "============================================"
+    _log "$*"
+    _log "============================================"
+}
 
-log()  { echo "[firstboot] $(date -u +%H:%M:%S)  $*"; }
-step() { echo ""; echo "[firstboot] ══════════════════════════════════════"; echo "[firstboot]  $*"; echo "[firstboot] ══════════════════════════════════════"; }
-warn() { echo "[firstboot] WARN  $*"; }
-die()  { echo "[firstboot] FATAL $*" >&2; exit 1; }
-
-log "Cinder OS first-boot provisioning — v${SCRIPT_VERSION}"
-log "Start time: ${START_TIME}"
-
-[[ "${EUID}" -eq 0 ]] || die "Must run as root"
-
-# ── Read operator customisation files ─────────────────────────────────────────
-
-_read_boot_file() {
-    local file="${BOOT_PART}/$1"
-    if [[ -f "${file}" ]]; then
-        tr -d '[:space:]' < "${file}"
+_read_boot_value() {
+    local file_path="${BOOT_DIR}/$1"
+    if [[ -f "${file_path}" ]]; then
+        tr -d '\r' < "${file_path}" | head -n1 | sed 's/^[[:space:]]*//;s/[[:space:]]*$//'
     else
         echo ""
     fi
 }
 
-CUSTOM_HOSTNAME="$(_read_boot_file cinder-hostname.txt)"
-CUSTOM_PUBKEY="$(_read_boot_file cinder-pubkey.txt)"
-CUSTOM_PRESET="$(_read_boot_file cinder-preset.txt)"
-CUSTOM_PASSWORD="$(_read_boot_file cinder-password.txt)"
+_valid_preset() {
+    case "$1" in
+        survival|event|low-power|benchmark|extreme)
+            return 0
+            ;;
+        *)
+            return 1
+            ;;
+    esac
+}
 
-HOSTNAME="${CUSTOM_HOSTNAME:-cinderpi}"
-PRESET="${CUSTOM_PRESET:-survival}"
+_expand_data_partition() {
+    local root_source disk data_part
 
-# ── Step 1: Expand root filesystem ───────────────────────────────────────────
+    root_source="$(findmnt -n -o SOURCE / || true)"
+    if [[ -z "${root_source}" || ! -b "${root_source}" ]]; then
+        _warn "Could not determine root block device; skipping partition expansion"
+        return 0
+    fi
 
-step "1/13 Expanding root filesystem"
+    if [[ "${root_source}" =~ p2$ ]]; then
+        data_part="${root_source/%p2/p3}"
+    elif [[ "${root_source}" =~ 2$ ]]; then
+        data_part="${root_source/%2/3}"
+    else
+        _warn "Root device format not recognized (${root_source}); skipping partition expansion"
+        return 0
+    fi
 
-ROOT_DEVICE=$(findmnt -n -o SOURCE / | sed 's/p[0-9]*$//')
-ROOT_PART=$(findmnt -n -o SOURCE /)
-PART_NUM=$(echo "${ROOT_PART}" | grep -oP '\d+$')
+    if [[ "${root_source}" =~ ^(/dev/mmcblk[0-9]+)p2$ ]]; then
+        disk="${BASH_REMATCH[1]}"
+    elif [[ "${root_source}" =~ ^(/dev/nvme[0-9]+n[0-9]+)p2$ ]]; then
+        disk="${BASH_REMATCH[1]}"
+    elif [[ "${root_source}" =~ ^(/dev/sd[a-z])2$ ]]; then
+        disk="${BASH_REMATCH[1]}"
+    else
+        local pkname
+        pkname="$(lsblk -no PKNAME "${root_source}" 2>/dev/null || true)"
+        if [[ -n "${pkname}" ]]; then
+            disk="/dev/${pkname}"
+        else
+            _warn "Could not derive disk backing ${root_source}; skipping partition expansion"
+            return 0
+        fi
+    fi
 
-log "Root device: ${ROOT_DEVICE}, partition: ${ROOT_PART} (#${PART_NUM})"
+    if [[ ! -b "${disk}" || ! -b "${data_part}" ]]; then
+        _warn "Data partition not available (${disk}, ${data_part}); skipping partition expansion"
+        return 0
+    fi
 
-if command -v raspi-config &>/dev/null; then
-    raspi-config --expand-rootfs || warn "raspi-config expand failed — partition may already be expanded"
+    if ! parted -s "${disk}" resizepart 3 100%; then
+        _warn "parted resizepart failed; continuing with existing partition size"
+        return 0
+    fi
+
+    partprobe "${disk}" || true
+    udevadm settle || true
+
+    if mountpoint -q "${DATA_DIR}"; then
+        resize2fs "${data_part}" || _warn "resize2fs failed on mounted ${data_part}"
+    else
+        e2fsck -pf "${data_part}" || true
+        resize2fs "${data_part}" || _warn "resize2fs failed on ${data_part}"
+    fi
+
+    _pass "Expanded data partition: ${data_part}"
+}
+
+if [[ -f "${COMPLETE_MARKER}" ]]; then
+    echo "[firstboot] Already complete (${COMPLETE_MARKER}); exiting"
+    exit 0
+fi
+
+[[ "${EUID}" -eq 0 ]] || _fail "Must run as root"
+
+if ! mountpoint -q "${DATA_DIR}"; then
+    mount "${DATA_DIR}" >/dev/null 2>&1 || _fail "Unable to mount ${DATA_DIR}"
+fi
+
+mkdir -p "${LOG_DIR}" || _fail "Unable to create ${LOG_DIR}"
+
+LOG_FILE="${LOG_DIR}/firstboot-${START_TS}.log"
+exec > >(tee -a "${LOG_FILE}") 2>&1
+
+_step "Starting firstboot provisioning"
+_pass "Log file: ${LOG_FILE}"
+
+CUSTOM_HOSTNAME="$(_read_boot_value cinder-hostname.txt)"
+CUSTOM_PUBKEY="$(_read_boot_value cinder-pubkey.txt)"
+CUSTOM_PRESET="$(_read_boot_value cinder-preset.txt)"
+CUSTOM_PASSWORD="$(_read_boot_value cinder-password.txt)"
+
+HOSTNAME_VALUE="${CUSTOM_HOSTNAME:-cinder}"
+PRESET_VALUE="${CUSTOM_PRESET:-survival}"
+
+_step "Expanding /data partition"
+_expand_data_partition
+mountpoint -q "${DATA_DIR}" || mount "${DATA_DIR}" || _warn "Failed to mount ${DATA_DIR}"
+
+_step "Preparing /data directories and /opt/cinder links"
+mkdir -p \
+    "${DATA_DIR}/world/datapacks" \
+    "${DATA_DIR}/logs" \
+    "${DATA_DIR}/backups" \
+    "${DATA_DIR}/staging" \
+    "${DATA_DIR}/plugins" \
+    "${DATA_DIR}/mods" \
+    "${DATA_DIR}/resourcepacks" \
+    "${DATA_DIR}/downloads" \
+    "${DATA_DIR}/metrics"
+
+mkdir -p "${CINDER_BASE}" "${CINDER_BASE}/cinder-core" "${CINDER_BASE}/config" "${CINDER_BASE}/scripts"
+
+for name in world logs backups staging plugins mods resourcepacks downloads metrics; do
+    if [[ ! -L "${CINDER_BASE}/${name}" ]]; then
+        rm -rf "${CINDER_BASE}/${name}"
+        ln -s "${DATA_DIR}/${name}" "${CINDER_BASE}/${name}"
+    fi
+done
+
+_pass "Data topology ready"
+
+_step "Setting hostname"
+echo "${HOSTNAME_VALUE}" > /etc/hostname
+hostnamectl set-hostname "${HOSTNAME_VALUE}" 2>/dev/null || hostname "${HOSTNAME_VALUE}"
+if ! grep -q "^127.0.1.1[[:space:]]\+${HOSTNAME_VALUE}$" /etc/hosts; then
+    echo "127.0.1.1 ${HOSTNAME_VALUE}" >> /etc/hosts
+fi
+_pass "Hostname set: ${HOSTNAME_VALUE}"
+
+_step "Creating service and admin users"
+if ! getent group "${CINDER_USER}" >/dev/null 2>&1; then
+    groupadd --gid "${CINDER_UID}" "${CINDER_USER}"
+fi
+
+if ! id -u "${CINDER_USER}" >/dev/null 2>&1; then
+    useradd --uid "${CINDER_UID}" --gid "${CINDER_UID}" --home-dir "${CINDER_BASE}" --system --shell /usr/sbin/nologin "${CINDER_USER}"
+fi
+passwd -l "${CINDER_USER}" >/dev/null 2>&1 || true
+
+if ! id -u "${CINDER_ADMIN_USER}" >/dev/null 2>&1; then
+    useradd --uid "${CINDER_ADMIN_UID}" --create-home --shell /bin/bash "${CINDER_ADMIN_USER}"
+fi
+
+usermod -aG sudo "${CINDER_ADMIN_USER}"
+
+if [[ -n "${CUSTOM_PASSWORD}" ]]; then
+    echo "${CINDER_ADMIN_USER}:${CUSTOM_PASSWORD}" | chpasswd
+    rm -f "${BOOT_DIR}/cinder-password.txt"
+    _pass "Applied admin password from ${BOOT_DIR}/cinder-password.txt"
 else
-    # Manual expansion via parted + resize2fs
-    parted -s "${ROOT_DEVICE}" resizepart "${PART_NUM}" 100% || warn "parted resizepart failed"
-    partprobe "${ROOT_DEVICE}" 2>/dev/null || true
-    sleep 1
-    resize2fs "${ROOT_PART}" 2>/dev/null || warn "resize2fs failed — filesystem may already be at max size"
+    echo "${CINDER_ADMIN_USER}:cinder" | chpasswd
+    chage -d 0 "${CINDER_ADMIN_USER}"
+    _warn "No custom password file found; set default and force change for ${CINDER_ADMIN_USER}"
 fi
 
-log "Root filesystem expansion complete"
+chown -R "${CINDER_USER}:${CINDER_USER}" "${CINDER_BASE}" "${DATA_DIR}"
 
-# ── Step 2: Set hostname ──────────────────────────────────────────────────────
-
-step "2/13 Setting hostname: ${HOSTNAME}"
-
-echo "${HOSTNAME}" > /etc/hostname
-hostnamectl set-hostname "${HOSTNAME}" 2>/dev/null || hostname "${HOSTNAME}"
-
-if ! grep -q "${HOSTNAME}" /etc/hosts; then
-    echo "127.0.1.1    ${HOSTNAME}" >> /etc/hosts
+_step "Applying preset override"
+if _valid_preset "${PRESET_VALUE}"; then
+    mkdir -p /etc/systemd/system/cinder.service.d
+    cat > /etc/systemd/system/cinder.service.d/preset.conf <<EOF
+[Service]
+Environment=CINDER_PRESET=${PRESET_VALUE}
+EOF
+    _pass "Preset applied: ${PRESET_VALUE}"
+else
+    _warn "Invalid preset '${PRESET_VALUE}' ignored; keeping service default"
 fi
 
-log "Hostname set to: ${HOSTNAME}"
-
-# ── Step 3: Regenerate SSH host keys ─────────────────────────────────────────
-
-step "3/13 Regenerating SSH host keys"
-
-rm -f /etc/ssh/ssh_host_*_key /etc/ssh/ssh_host_*_key.pub
-ssh-keygen -A
-log "SSH host keys regenerated"
-
-# Harden SSH config
-cat > /etc/ssh/sshd_config.d/cinder-hardening.conf << 'EOF'
+_step "Configuring SSH hardening and key provisioning"
+mkdir -p /etc/ssh/sshd_config.d
+cat > /etc/ssh/sshd_config.d/cinder-hardening.conf <<'EOF'
 PermitRootLogin no
-PasswordAuthentication yes
+PasswordAuthentication no
+PermitEmptyPasswords no
 PubkeyAuthentication yes
 AuthorizedKeysFile .ssh/authorized_keys
+MaxAuthTries 3
+LoginGraceTime 30
 X11Forwarding no
 AllowTcpForwarding no
-MaxAuthTries 3
-LoginGraceTime 20
 ClientAliveInterval 60
 ClientAliveCountMax 3
 EOF
 
-log "SSH hardening config applied"
-
-# ── Step 4: Create 'cinder' service user ─────────────────────────────────────
-
-step "4/13 Creating cinder service user (uid=${CINDER_UID})"
-
-if ! id "${CINDER_USER}" &>/dev/null; then
-    useradd \
-        --uid "${CINDER_UID}" \
-        --system \
-        --no-create-home \
-        --home-dir "${CINDER_BASE}" \
-        --shell /usr/sbin/nologin \
-        --comment "Cinder Core service account" \
-        "${CINDER_USER}"
-    log "Created user: ${CINDER_USER} (uid=${CINDER_UID})"
-else
-    log "User ${CINDER_USER} already exists — skipping creation"
-fi
-
-# Lock the service account password — SSH key auth only via cinder-admin
-passwd -l "${CINDER_USER}" 2>/dev/null || true
-
-# ── Step 5: Create 'cinder-admin' operator user ───────────────────────────────
-
-step "5/13 Creating cinder-admin operator user (uid=${CINDER_ADMIN_UID})"
-
-if ! id "${CINDER_ADMIN_USER}" &>/dev/null; then
-    useradd \
-        --uid "${CINDER_ADMIN_UID}" \
-        --create-home \
-        --shell /bin/bash \
-        --comment "Cinder operator account" \
-        "${CINDER_ADMIN_USER}"
-    log "Created user: ${CINDER_ADMIN_USER} (uid=${CINDER_ADMIN_UID})"
-fi
-
-# Add to sudo group
-usermod -aG sudo "${CINDER_ADMIN_USER}"
-
-# Set password if provided, otherwise force password change on first login
-if [[ -n "${CUSTOM_PASSWORD}" ]]; then
-    echo "${CINDER_ADMIN_USER}:${CUSTOM_PASSWORD}" | chpasswd
-    log "Password set for ${CINDER_ADMIN_USER} from boot customisation file"
-    shred -u "${BOOT_PART}/cinder-password.txt" 2>/dev/null || \
-        rm -f "${BOOT_PART}/cinder-password.txt"
-else
-    # Set a default password and force change
-    echo "${CINDER_ADMIN_USER}:cinderpi" | chpasswd
-    chage -d 0 "${CINDER_ADMIN_USER}"
-    log "Default password set for ${CINDER_ADMIN_USER} — change required on first login"
-fi
-
-# Install SSH public key if provided
 if [[ -n "${CUSTOM_PUBKEY}" ]]; then
-    local admin_home
-    admin_home=$(getent passwd "${CINDER_ADMIN_USER}" | cut -d: -f6)
-    mkdir -p "${admin_home}/.ssh"
-    echo "${CUSTOM_PUBKEY}" >> "${admin_home}/.ssh/authorized_keys"
-    chmod 700 "${admin_home}/.ssh"
-    chmod 600 "${admin_home}/.ssh/authorized_keys"
-    chown -R "${CINDER_ADMIN_USER}:${CINDER_ADMIN_USER}" "${admin_home}/.ssh"
-    log "SSH public key installed for ${CINDER_ADMIN_USER}"
+    ADMIN_HOME="$(getent passwd "${CINDER_ADMIN_USER}" | cut -d: -f6)"
+    mkdir -p "${ADMIN_HOME}/.ssh"
+    touch "${ADMIN_HOME}/.ssh/authorized_keys"
+    if ! grep -qxF "${CUSTOM_PUBKEY}" "${ADMIN_HOME}/.ssh/authorized_keys"; then
+        echo "${CUSTOM_PUBKEY}" >> "${ADMIN_HOME}/.ssh/authorized_keys"
+    fi
+    chmod 700 "${ADMIN_HOME}/.ssh"
+    chmod 600 "${ADMIN_HOME}/.ssh/authorized_keys"
+    chown -R "${CINDER_ADMIN_USER}:${CINDER_ADMIN_USER}" "${ADMIN_HOME}/.ssh"
+    _pass "Installed SSH public key for ${CINDER_ADMIN_USER}"
+else
+    _warn "No ${BOOT_DIR}/cinder-pubkey.txt provided; SSH password auth is disabled"
 fi
 
-# ── Step 6: Create /opt/cinder directory structure ────────────────────────────
+systemctl restart ssh >/dev/null 2>&1 || systemctl restart sshd >/dev/null 2>&1 || _warn "Could not restart SSH service"
 
-step "6/13 Creating /opt/cinder directory structure"
-
-declare -a CINDER_DIRS=(
-    "${CINDER_BASE}"
-    "${CINDER_BASE}/world"
-    "${CINDER_BASE}/logs"
-    "${CINDER_BASE}/backups"
-    "${CINDER_BASE}/staging"
-    "${CINDER_BASE}/config"
-    "${CINDER_BASE}/plugins"
-    "${CINDER_BASE}/mods"
-    "${CINDER_BASE}/cinder-core"
-    "${CINDER_BASE}/cinder-runtime/presets"
-    "${CINDER_BASE}/cinder-runtime/launch"
-    "${CINDER_BASE}/scripts"
-)
-
-for dir in "${CINDER_DIRS[@]}"; do
-    mkdir -p "${dir}"
-    log "  ${dir}"
-done
-
-chown -R "${CINDER_USER}:${CINDER_USER}" "${CINDER_BASE}"
-chmod 750 "${CINDER_BASE}"
-chmod 770 "${CINDER_BASE}/world"
-chmod 770 "${CINDER_BASE}/logs"
-chmod 770 "${CINDER_BASE}/backups"
-chmod 770 "${CINDER_BASE}/staging"
-
-log "Directory structure created and ownership set"
-
-# Write import allowlist skeleton if not present
-if [[ ! -f "${CINDER_BASE}/config/import-allowlist.sha256" ]]; then
-    cat > "${CINDER_BASE}/config/import-allowlist.sha256" << 'EOF'
-# Cinder USB Import Allowlist
-# Add SHA-256 hashes of approved files, one per line.
-# Format: <sha256hash>  <filename>
-# Generate with: sha256sum <file>
-#
-# When this file is present, usb-import.sh will reject any file
-# whose hash is not listed here. Leave empty to allow all validated files.
-EOF
-    chown "${CINDER_USER}:${CINDER_USER}" "${CINDER_BASE}/config/import-allowlist.sha256"
-    log "Created import allowlist skeleton"
+_step "Applying firewall and fail2ban"
+if [[ -f /etc/nftables.conf ]]; then
+    nft -f /etc/nftables.conf >/dev/null 2>&1 || _warn "Failed to apply nftables rules"
+    systemctl enable nftables.service >/dev/null 2>&1 || true
+    systemctl restart nftables.service >/dev/null 2>&1 || true
 fi
-
-# Write default server.properties if not present
-if [[ ! -f "${CINDER_BASE}/config/server.properties" ]]; then
-    cat > "${CINDER_BASE}/config/server.properties" << EOF
-# Cinder server.properties
-# Generated by firstboot.sh on ${START_TIME}
-# Edit and restart cinder.service to apply changes.
-
-server-port=25565
-max-players=20
-online-mode=true
-difficulty=normal
-gamemode=survival
-level-name=world
-motd=Cinder \u2014 Raspberry Pi 4 Minecraft Server
-view-distance=8
-simulation-distance=6
-spawn-protection=16
-EOF
-    chown "${CINDER_USER}:${CINDER_USER}" "${CINDER_BASE}/config/server.properties"
-    log "Created default server.properties"
-fi
-
-# Apply custom preset if specified
-if [[ -n "${CUSTOM_PRESET}" ]]; then
-    mkdir -p /etc/systemd/system/cinder.service.d
-    cat > /etc/systemd/system/cinder.service.d/preset.conf << EOF
-[Service]
-Environment=CINDER_PRESET=${CUSTOM_PRESET}
-EOF
-    log "Preset override written: ${CUSTOM_PRESET}"
-fi
-
-# ── Step 7: Enable systemd services ──────────────────────────────────────────
-
-step "7/13 Enabling systemd services"
-
-systemctl daemon-reload
-
-systemctl enable cinder.service
-log "Enabled: cinder.service"
-
-systemctl enable fail2ban.service 2>/dev/null && log "Enabled: fail2ban.service" || warn "fail2ban not installed"
-systemctl enable nftables.service 2>/dev/null && log "Enabled: nftables.service" || warn "nftables not installed"
-
-# ── Step 8: Configure nftables firewall ───────────────────────────────────────
-
-step "8/13 Configuring nftables firewall"
-
-cat > /etc/nftables.conf << 'EOF'
-#!/usr/sbin/nft -f
-# Cinder OS — nftables firewall
-# Managed by firstboot.sh; edit and run 'nft -f /etc/nftables.conf' to apply.
-
-flush ruleset
-
-table inet filter {
-    chain input {
-        type filter hook input priority 0; policy drop;
-
-        # Accept established and related connections
-        ct state established,related accept
-
-        # Accept loopback
-        iif lo accept
-
-        # Accept ICMP (ping)
-        ip  protocol icmp  accept
-        ip6 nexthdr  icmpv6 accept
-
-        # SSH (rate limited to 4 connections/minute to complement fail2ban)
-        tcp dport 22 ct state new limit rate 4/minute accept
-
-        # Minecraft player connections
-        tcp dport 25565 accept
-
-        # Drop everything else
-        log prefix "[nft-drop] " drop
-    }
-
-    chain forward {
-        type filter hook forward priority 0; policy drop;
-    }
-
-    chain output {
-        type filter hook output priority 0; policy accept;
-    }
-}
-EOF
-
-nft -f /etc/nftables.conf 2>/dev/null && log "nftables rules applied" || warn "nftables apply failed — check /etc/nftables.conf"
-
-# ── Step 9: Configure fail2ban ────────────────────────────────────────────────
-
-step "9/13 Configuring fail2ban"
 
 if [[ -d /etc/fail2ban ]]; then
-    cat > /etc/fail2ban/jail.d/cinder-ssh.conf << 'EOF'
+    mkdir -p /etc/fail2ban/jail.d
+    cat > /etc/fail2ban/jail.d/cinder-ssh.conf <<'EOF'
 [sshd]
-enabled  = true
-port     = ssh
-filter   = sshd
-backend  = systemd
+enabled = true
+port = ssh
+backend = systemd
 maxretry = 5
-bantime  = 3600
-findtime = 600
+findtime = 10m
+bantime = 10m
 EOF
-    log "fail2ban SSH jail configured"
-else
-    warn "fail2ban not installed — skipping jail configuration"
+    systemctl enable fail2ban.service >/dev/null 2>&1 || true
+    systemctl restart fail2ban.service >/dev/null 2>&1 || true
 fi
 
-# ── Step 10: CPU governor ─────────────────────────────────────────────────────
+_step "Enabling watchdog and OTA units"
+systemctl daemon-reload
 
-step "10/13 Setting CPU governor"
-
-GOVERNOR="ondemand"
-if [[ "${PRESET}" == "benchmark" || "${PRESET}" == "extreme" ]]; then
-    GOVERNOR="performance"
+if systemctl list-unit-files | grep -q '^cinder-watchdog.service'; then
+    systemctl enable cinder-watchdog.service >/dev/null 2>&1 || _warn "Failed to enable cinder-watchdog.service"
+    systemctl start cinder-watchdog.service >/dev/null 2>&1 || _warn "Failed to start cinder-watchdog.service"
 fi
 
-if [[ -f /sys/devices/system/cpu/cpu0/cpufreq/scaling_governor ]]; then
-    for gov_path in /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor; do
-        echo "${GOVERNOR}" > "${gov_path}" 2>/dev/null || true
-    done
-    log "CPU governor set to: ${GOVERNOR}"
+if systemctl list-unit-files | grep -q '^cinder-ota.timer'; then
+    systemctl enable cinder-ota.timer >/dev/null 2>&1 || _warn "Failed to enable cinder-ota.timer"
+    systemctl start cinder-ota.timer >/dev/null 2>&1 || _warn "Failed to start cinder-ota.timer"
+elif systemctl list-unit-files | grep -q '^cinder-ota.service'; then
+    systemctl enable cinder-ota.service >/dev/null 2>&1 || _warn "Failed to enable cinder-ota.service"
+fi
 
-    # Persist via cpufrequtils if available
-    if command -v cpufreq-set &>/dev/null; then
-        for cpu in /sys/devices/system/cpu/cpu[0-9]*; do
-            cpufreq-set -c "$(basename "${cpu}" | tr -d 'cpu')" -g "${GOVERNOR}" 2>/dev/null || true
-        done
+_step "Running prestart checks"
+if [[ -x "${PRESTART_CHECK_SCRIPT}" ]]; then
+    if "${PRESTART_CHECK_SCRIPT}"; then
+        _pass "prestart-check.sh completed"
+    else
+        _warn "prestart-check.sh reported issues"
     fi
 else
-    warn "CPU frequency scaling not available — governor not set"
+    _warn "Prestart script missing: ${PRESTART_CHECK_SCRIPT}"
 fi
 
-# ── Step 11: Pi 4 tuning ──────────────────────────────────────────────────────
-
-step "11/13 Applying Pi 4 tuning"
-
-CONFIG_TXT="${BOOT_PART}/config.txt"
-if [[ -f "${CONFIG_TXT}" ]]; then
-    # Ensure Cinder's required config entries are present
-    declare -A REQUIRED_SETTINGS=(
-        ["gpu_mem"]="16"
-        ["arm_64bit"]="1"
-        ["disable_overscan"]="1"
-    )
-
-    for key in "${!REQUIRED_SETTINGS[@]}"; do
-        if ! grep -q "^${key}=" "${CONFIG_TXT}"; then
-            echo "${key}=${REQUIRED_SETTINGS[${key}]}" >> "${CONFIG_TXT}"
-            log "  Added to config.txt: ${key}=${REQUIRED_SETTINGS[${key}]}"
-        fi
-    done
-
-    log "Pi 4 boot config verified"
+_step "Starting cinder.service"
+systemctl enable cinder.service >/dev/null 2>&1 || _warn "Could not enable cinder.service"
+if systemctl restart cinder.service; then
+    _pass "cinder.service restart requested"
 else
-    warn "config.txt not found at ${CONFIG_TXT}"
+    _warn "cinder.service restart failed"
 fi
 
-# Set swappiness low — swap on SD kills tick consistency
-sysctl -w vm.swappiness=10 2>/dev/null || true
-echo "vm.swappiness=10" >> /etc/sysctl.d/99-cinder.conf
-log "vm.swappiness=10 applied"
-
-# Disable transparent huge pages — reduces GC pause unpredictability
-if [[ -f /sys/kernel/mm/transparent_hugepage/enabled ]]; then
-    echo "madvise" > /sys/kernel/mm/transparent_hugepage/enabled 2>/dev/null || true
-    echo "never"   > /sys/kernel/mm/transparent_hugepage/defrag  2>/dev/null || true
-    log "Transparent huge pages set to madvise/never"
+if systemctl is-active --quiet cinder.service; then
+    _pass "cinder.service is active"
+else
+    _warn "cinder.service is not active; inspect with: systemctl status cinder.service"
 fi
 
-# ── Step 12: Write firstboot log summary ──────────────────────────────────────
-
-step "12/13 Writing provisioning summary"
-
-cat >> "${LOG_FILE}" << EOF
-
-══════════════════════════════════════════════════════════
-Cinder OS First-Boot Provisioning Summary
-══════════════════════════════════════════════════════════
-Completed : $(date -u +%Y-%m-%dT%H:%M:%SZ)
-Hostname  : ${HOSTNAME}
-Preset    : ${PRESET}
-CPU Gov   : ${GOVERNOR}
-Users     : ${CINDER_USER} (uid=${CINDER_UID}) ${CINDER_ADMIN_USER} (uid=${CINDER_ADMIN_UID})
-Base dir  : ${CINDER_BASE}
-SSH keys  : regenerated
-Firewall  : nftables (ports 22, 25565)
-fail2ban  : SSH jail (5 retries / 1h ban)
-══════════════════════════════════════════════════════════
-
-Next steps:
-  1. SSH in:  ssh cinder-admin@${HOSTNAME}.local
-  2. Deploy Cinder Core JAR to: ${CINDER_BASE}/cinder-core/build/libs/
-  3. Start server: sudo systemctl start cinder
-  4. Check status: sudo systemctl status cinder
-  5. View logs:    journalctl -u cinder -f
-
-EOF
-
-log "Provisioning log written to: ${LOG_FILE}"
-
-# ── Step 13: Mark complete and disable service ────────────────────────────────
-
-step "13/13 Marking first-boot complete"
-
+_step "Marking firstboot completion"
+mkdir -p "${CINDER_BASE}"
 date -u +%Y-%m-%dT%H:%M:%SZ > "${COMPLETE_MARKER}"
-chown root:root "${COMPLETE_MARKER}"
-chmod 444 "${COMPLETE_MARKER}"
+chmod 0644 "${COMPLETE_MARKER}"
+rm -f "${PENDING_MARKER}" /etc/cinder-firstboot-pending
 
-systemctl disable cinder-firstboot.service 2>/dev/null || true
+systemctl disable cinder-firstboot.service >/dev/null 2>&1 || true
 
-log "First-boot provisioning complete."
-log "The cinder-firstboot.service will not run again."
-log "Cinder Core will start automatically on next boot."
-log ""
-log "Reboot recommended to apply filesystem expansion and kernel parameters."
+_pass "Firstboot complete marker written: ${COMPLETE_MARKER}"
+_pass "Provisioning completed"
+_log "Summary: hostname=${HOSTNAME_VALUE} preset=${PRESET_VALUE} log=${LOG_FILE}"

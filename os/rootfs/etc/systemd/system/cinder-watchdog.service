@@ -1,0 +1,16 @@
+[Unit]
+Description=Cinder watchdog arming service
+Documentation=https://github.com/cinder-project/Cinder
+After=local-fs.target
+Before=cinder.service
+Wants=dev-watchdog.device
+Requires=dev-watchdog.device
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/opt/cinder/scripts/watchdog-setup.sh
+TimeoutStartSec=20
+
+[Install]
+WantedBy=multi-user.target
