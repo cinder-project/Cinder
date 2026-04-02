@@ -341,9 +341,10 @@ chroot "${ROOTFS_DIR}" bash -euo pipefail -c '
     export DEBIAN_FRONTEND=noninteractive
     apt-get update
 
-    if ! apt-cache show openjdk-21-jre-headless >/dev/null 2>&1; then
-        echo "[chroot-setup] WARN    openjdk-21-jre-headless unavailable in configured apt sources"
-        sed -i "/^openjdk-21-jre-headless$/d" /tmp/cinder-packages.txt
+    JAVA21_CANDIDATE="$(apt-cache policy openjdk-21-jre-headless | awk "/Candidate:/ {print \\$2; exit}")"
+    if [[ -z "${JAVA21_CANDIDATE}" || "${JAVA21_CANDIDATE}" == "(none)" ]]; then
+        echo "[chroot-setup] WARN    openjdk-21-jre-headless has no install candidate; using fallback runtime"
+        sed -i "/^openjdk-21-jre-headless[[:space:]]*$/d" /tmp/cinder-packages.txt
     fi
 
     xargs -a /tmp/cinder-packages.txt apt-get install -y --no-install-recommends
