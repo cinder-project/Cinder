@@ -202,6 +202,7 @@ _require_cmd awk
 _require_cmd cut
 _require_cmd curl
 _require_cmd gpg
+_require_cmd tar
 _require_cmd findmnt
 _require_cmd install
 _require_cmd xargs
@@ -339,11 +340,39 @@ rm -f "${PKG_FILE_HOST}"
 chroot "${ROOTFS_DIR}" bash -euo pipefail -c '
     export DEBIAN_FRONTEND=noninteractive
     apt-get update
+
+    if ! apt-cache show openjdk-21-jre-headless >/dev/null 2>&1; then
+        echo "[chroot-setup] WARN    openjdk-21-jre-headless unavailable in configured apt sources"
+        sed -i "/^openjdk-21-jre-headless$/d" /tmp/cinder-packages.txt
+    fi
+
     xargs -a /tmp/cinder-packages.txt apt-get install -y --no-install-recommends
     apt-get clean
     rm -rf /var/lib/apt/lists/*
     rm -f /tmp/cinder-packages.txt
 '
+
+if [[ ! -x "${ROOTFS_DIR}/usr/lib/jvm/java-21-openjdk-arm64/bin/java" ]]; then
+    _warn "Installing Java 21 runtime fallback (Temurin)"
+
+    JAVA21_ARCHIVE="$(mktemp)"
+    curl -fsSL "https://api.adoptium.net/v3/binary/latest/21/ga/linux/aarch64/jre/hotspot/normal/eclipse?project=jdk" -o "${JAVA21_ARCHIVE}"
+
+    mkdir -p "${ROOTFS_DIR}/usr/lib/jvm"
+    rm -rf "${ROOTFS_DIR}/usr/lib/jvm/java-21-openjdk-arm64"
+    mkdir -p "${ROOTFS_DIR}/usr/lib/jvm/java-21-openjdk-arm64"
+    tar -xzf "${JAVA21_ARCHIVE}" -C "${ROOTFS_DIR}/usr/lib/jvm/java-21-openjdk-arm64" --strip-components=1
+    rm -f "${JAVA21_ARCHIVE}"
+
+    chroot "${ROOTFS_DIR}" bash -euo pipefail -c '
+        update-alternatives --install /usr/bin/java java /usr/lib/jvm/java-21-openjdk-arm64/bin/java 2121
+        update-alternatives --set java /usr/lib/jvm/java-21-openjdk-arm64/bin/java
+    '
+
+    _pass "Java 21 runtime fallback installed"
+else
+    _pass "Java 21 runtime installed from apt"
+fi
 
 _pass "Base package set installed"
 
