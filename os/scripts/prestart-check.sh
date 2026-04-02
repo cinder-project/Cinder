@@ -4,12 +4,12 @@
 # Pre-start environment validation for cinder.service (ExecStartPre)
 #
 # Called by systemd as root before launch.sh runs. Validates that the
-# environment is ready for Cinder Core to start. Exits non-zero on any
+# environment is ready for the PaperMC runtime to start. Exits non-zero on any
 # failure, which prevents systemd from proceeding to ExecStart.
 #
 # Checks performed:
 #   1. Java 21 is present and is the correct version
-#   2. Cinder JAR exists and is readable
+#   2. PaperMC server JAR exists and is readable
 #   3. Required directories exist with correct ownership
 #   4. Sufficient disk space on world and log volumes
 #   5. Sufficient free memory for the configured heap
@@ -34,7 +34,7 @@ IFS=$'\n\t'
 # ── Configuration ─────────────────────────────────────────────────────────────
 
 : "${CINDER_BASE_DIR:=/opt/cinder}"
-: "${CINDER_JAR:=${CINDER_BASE_DIR}/cinder-core/build/libs/cinder-core.jar}"
+: "${CINDER_JAR:=${CINDER_BASE_DIR}/server/paper-server.jar}"
 : "${CINDER_WORLD_DIR:=${CINDER_BASE_DIR}/world}"
 : "${CINDER_LOG_DIR:=${CINDER_BASE_DIR}/logs}"
 : "${CINDER_PRESET:=survival}"
@@ -80,17 +80,17 @@ check_java() {
     fi
 }
 
-# ── Check 2: Cinder JAR ───────────────────────────────────────────────────────
+# ── Check 2: PaperMC server JAR ───────────────────────────────────────────────
 
 check_jar() {
     if [[ ! -f "${CINDER_JAR}" ]]; then
-        _fail "Cinder JAR not found: ${CINDER_JAR}"
-        _hint "Build Cinder Core or deploy the JAR to ${CINDER_JAR}"
+        _fail "PaperMC server JAR not found: ${CINDER_JAR}"
+        _hint "Deploy paper-server.jar to ${CINDER_JAR}"
         return
     fi
 
     if [[ ! -r "${CINDER_JAR}" ]]; then
-        _fail "Cinder JAR not readable: ${CINDER_JAR}"
+        _fail "PaperMC server JAR not readable: ${CINDER_JAR}"
         _hint "chown cinder:cinder ${CINDER_JAR} && chmod 644 ${CINDER_JAR}"
         return
     fi
@@ -99,11 +99,11 @@ check_jar() {
     jar_size_kb=$(du -k "${CINDER_JAR}" | cut -f1)
 
     if [[ "${jar_size_kb}" -lt 10 ]]; then
-        _fail "Cinder JAR suspiciously small (${jar_size_kb} KB) — may be corrupt"
+        _fail "PaperMC server JAR suspiciously small (${jar_size_kb} KB) — may be corrupt"
         return
     fi
 
-    _pass "Cinder JAR — ${CINDER_JAR} (${jar_size_kb} KB)"
+    _pass "PaperMC server JAR — ${CINDER_JAR} (${jar_size_kb} KB)"
 }
 
 # ── Check 3: Required directories ────────────────────────────────────────────
@@ -275,5 +275,5 @@ if [[ "${FAILED}" -ne 0 ]]; then
     exit 1
 fi
 
-_pass "All checks passed. Starting Cinder Core."
+_pass "All checks passed. Starting PaperMC runtime."
 exit 0

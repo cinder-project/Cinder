@@ -33,10 +33,12 @@ readonly SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 : "${ROOTFS_DIR:=}"
 : "${REPO_ROOT:=$(cd "${SCRIPT_DIR}/../.." && pwd)}"
 : "${PACKAGES_MANIFEST:=${SCRIPT_DIR}/packages.list}"
+: "${PACKAGES_DESKTOP_MANIFEST:=${SCRIPT_DIR}/packages-desktop.list}"
 : "${DEBIAN_RELEASE:=bookworm}"
 : "${DEBIAN_MIRROR:=https://deb.debian.org/debian}"
 : "${RPI_MIRROR:=http://archive.raspberrypi.com/debian}"
 : "${TARGET_ARCH:=arm64}"
+: "${CINDER_OS_PROFILE:=desktop}"
 : "${HOSTNAME_VALUE:=cinder}"
 : "${BOOT_UUID:=}"
 : "${ROOT_UUID:=}"
@@ -47,6 +49,8 @@ readonly SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 : "${CINDER_ADMIN_UID:=1002}"
 : "${CINDER_USER:=cinder}"
 : "${CINDER_ADMIN_USER:=cinder-admin}"
+: "${PAPER_MC_VERSION:=1.20.1}"
+: "${PAPER_BUILD:=latest}"
 : "${LOG_FILE:=}"
 
 MOUNTED_DIRS=()
@@ -76,9 +80,12 @@ Required:
 Optional:
   --repo-root <path>       Cinder repository root (default: auto-detect)
   --packages <path>        Package manifest (default: os/build/packages.list)
+    --profile <name>         Build profile: server|desktop (default: desktop)
   --debian-release <name>  Debian release (default: bookworm)
   --debian-mirror <url>    Debian mirror (default: deb.debian.org)
   --rpi-mirror <url>       Raspberry Pi apt mirror
+    --paper-mc-version <v>   PaperMC target Minecraft version (default: 1.20.1)
+    --paper-build <n|latest> PaperMC build number or latest (default: latest)
   --hostname <name>        Base hostname in image (default: cinder)
   --skip-debootstrap       Configure existing rootfs only
   --keep-qemu              Keep qemu-aarch64-static in rootfs after setup
@@ -101,6 +108,10 @@ while [[ $# -gt 0 ]]; do
             PACKAGES_MANIFEST="${2:?--packages requires a value}"
             shift 2
             ;;
+        --profile)
+            CINDER_OS_PROFILE="${2:?--profile requires a value}"
+            shift 2
+            ;;
         --debian-release)
             DEBIAN_RELEASE="${2:?--debian-release requires a value}"
             shift 2
@@ -111,6 +122,14 @@ while [[ $# -gt 0 ]]; do
             ;;
         --rpi-mirror)
             RPI_MIRROR="${2:?--rpi-mirror requires a value}"
+            shift 2
+            ;;
+        --paper-mc-version)
+            PAPER_MC_VERSION="${2:?--paper-mc-version requires a value}"
+            shift 2
+            ;;
+        --paper-build)
+            PAPER_BUILD="${2:?--paper-build requires a value}"
             shift 2
             ;;
         --hostname)
@@ -221,6 +240,18 @@ if [[ ! -d "${REPO_ROOT}/os/scripts" ]]; then
     _fail "Repository root does not look like Cinder tree: ${REPO_ROOT}"
 fi
 
+case "${CINDER_OS_PROFILE}" in
+    server|desktop)
+        ;;
+    *)
+        _fail "Unsupported profile '${CINDER_OS_PROFILE}' (expected: server|desktop)"
+        ;;
+esac
+
+if [[ "${CINDER_OS_PROFILE}" == "desktop" && ! -f "${PACKAGES_DESKTOP_MANIFEST}" ]]; then
+    _fail "Desktop package manifest not found: ${PACKAGES_DESKTOP_MANIFEST}"
+fi
+
 HOST_ARCH="$(uname -m)"
 if [[ "${HOST_ARCH}" == "x86_64" ]]; then
     _require_cmd qemu-aarch64-static
@@ -327,6 +358,16 @@ parse_package_manifest() {
 PKG_FILE_HOST="$(mktemp)"
 parse_package_manifest "${PACKAGES_MANIFEST}" "${PKG_FILE_HOST}"
 
+if [[ "${CINDER_OS_PROFILE}" == "desktop" ]]; then
+    PKG_DESKTOP_FILE_HOST="$(mktemp)"
+    parse_package_manifest "${PACKAGES_DESKTOP_MANIFEST}" "${PKG_DESKTOP_FILE_HOST}"
+    cat "${PKG_DESKTOP_FILE_HOST}" >> "${PKG_FILE_HOST}"
+    rm -f "${PKG_DESKTOP_FILE_HOST}"
+    _pass "Desktop package profile enabled"
+else
+    _pass "Server package profile enabled"
+fi
+
 cat >> "${PKG_FILE_HOST}" <<'EOF'
 raspberrypi-kernel
 raspberrypi-bootloader
@@ -430,6 +471,7 @@ Cinder OS first-boot customisation files:
   cinder-hostname.txt   -> hostname (single line)
   cinder-pubkey.txt     -> SSH public key for cinder-admin
   cinder-preset.txt     -> startup preset (survival/event/low-power/benchmark/extreme)
+    cinder-eula.txt       -> set to true to auto-accept Minecraft EULA on first boot
   cinder-password.txt   -> initial cinder-admin password (deleted on first boot)
 EOF
 
@@ -442,7 +484,7 @@ mkdir -p \
     "${ROOTFS_DIR}/opt/cinder/cinder-runtime" \
     "${ROOTFS_DIR}/opt/cinder/cinder-control" \
     "${ROOTFS_DIR}/opt/cinder/scripts" \
-    "${ROOTFS_DIR}/opt/cinder/cinder-core" \
+    "${ROOTFS_DIR}/opt/cinder/server" \
     "${ROOTFS_DIR}/opt/cinder/dashboard"
 
 rsync -a --delete "${REPO_ROOT}/cinder-runtime/" "${ROOTFS_DIR}/opt/cinder/cinder-runtime/"
@@ -481,14 +523,40 @@ if [[ -f "${REPO_ROOT}/os/rootfs/etc/systemd/system/cinder-ota.timer" ]]; then
     install -m 0644 "${REPO_ROOT}/os/rootfs/etc/systemd/system/cinder-ota.timer" "${ROOTFS_DIR}/etc/systemd/system/cinder-ota.timer"
 fi
 
-JAR_CANDIDATE=""
-if compgen -G "${REPO_ROOT}/build/libs/cinder-*-all.jar" >/dev/null; then
-    JAR_CANDIDATE="$(ls -1 "${REPO_ROOT}"/build/libs/cinder-*-all.jar | head -1)"
-    install -m 0644 "${JAR_CANDIDATE}" "${ROOTFS_DIR}/opt/cinder/cinder-core/cinder-core.jar"
-    _pass "Installed runtime jar: $(basename "${JAR_CANDIDATE}")"
-else
-    _warn "No built fat jar found in build/libs; image will require jar injection/update before first launch"
+PAPER_VERSION_META_URL="https://api.papermc.io/v2/projects/paper/versions/${PAPER_MC_VERSION}"
+PAPER_BUILD_RESOLVED="${PAPER_BUILD}"
+
+if [[ "${PAPER_BUILD}" == "latest" ]]; then
+    PAPER_META_JSON="$(curl -fsSL --retry 5 --retry-delay 2 --retry-all-errors "${PAPER_VERSION_META_URL}")"
+    PAPER_BUILD_RESOLVED="$(printf '%s' "${PAPER_META_JSON}" | tr -d '\n' | sed -n 's/.*"builds":\[\([^]]*\)\].*/\1/p' | awk -F',' '{gsub(/[[:space:]]/, "", $NF); print $NF}')"
+
+    if [[ -z "${PAPER_BUILD_RESOLVED}" ]]; then
+        _fail "Unable to resolve latest PaperMC build for Minecraft ${PAPER_MC_VERSION}"
+    fi
 fi
+
+if [[ ! "${PAPER_BUILD_RESOLVED}" =~ ^[0-9]+$ ]]; then
+    _fail "Invalid PaperMC build value: ${PAPER_BUILD_RESOLVED}"
+fi
+
+PAPER_URL="https://api.papermc.io/v2/projects/paper/versions/${PAPER_MC_VERSION}/builds/${PAPER_BUILD_RESOLVED}/downloads/paper-${PAPER_MC_VERSION}-${PAPER_BUILD_RESOLVED}.jar"
+if curl -fsSL --retry 5 --retry-delay 2 --retry-all-errors "${PAPER_URL}" -o "${ROOTFS_DIR}/opt/cinder/server/paper-server.jar"; then
+    _pass "PaperMC server installed (mc=${PAPER_MC_VERSION}, build=${PAPER_BUILD_RESOLVED})"
+else
+    _fail "Unable to download PaperMC server jar from ${PAPER_URL}"
+fi
+
+cat > "${ROOTFS_DIR}/opt/cinder/eula.txt" <<'EOF'
+eula=false
+EOF
+
+cat > "${ROOTFS_DIR}/opt/cinder/server.properties" <<'EOF'
+motd=Cinder OS PaperMC Host
+view-distance=8
+simulation-distance=6
+enable-rcon=false
+max-tick-time=60000
+EOF
 
 find "${ROOTFS_DIR}/opt/cinder/scripts" -type f -name '*.sh' -exec chmod 0750 {} \;
 

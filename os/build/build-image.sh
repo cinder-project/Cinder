@@ -19,14 +19,16 @@ IFS=$'\n\t'
 readonly SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 readonly REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 
-: "${CINDER_OS_VERSION:=0.1.0-dev}"
+: "${CINDER_OS_VERSION:=1.0.0}"
 : "${IMAGE_SIZE_GIB:=8}"
 : "${OUTPUT_DIR:=${SCRIPT_DIR}/output}"
 : "${WORK_DIR:=${SCRIPT_DIR}/work}"
 : "${DEBIAN_RELEASE:=bookworm}"
 : "${DEBIAN_MIRROR:=https://deb.debian.org/debian}"
 : "${RPI_MIRROR:=http://archive.raspberrypi.com/debian}"
-: "${CINDER_OS_PROFILE:=server}"
+: "${PAPER_MC_VERSION:=1.20.1}"
+: "${PAPER_BUILD:=latest}"
+: "${CINDER_OS_PROFILE:=desktop}"
 : "${KEEP_RAW_IMAGE:=false}"
 : "${KEEP_WORK_DIR:=false}"
 
@@ -51,12 +53,14 @@ Options:
   --version <ver>            Version string in output artifact name
   --image-size-gib <int>     Raw image size in GiB (default: 8)
     --image-size <int>         Legacy alias for --image-size-gib
-    --profile <name>           Legacy profile argument (accepted for compatibility)
+    --profile <name>           Build profile: server|desktop (default: desktop)
   --output-dir <path>        Output artifact directory
   --work-dir <path>          Build workspace directory
   --debian-release <name>    Debian release (default: bookworm)
   --debian-mirror <url>      Debian mirror URL
   --rpi-mirror <url>         Raspberry Pi archive URL
+    --paper-mc-version <v>     PaperMC target Minecraft version (default: 1.20.1)
+    --paper-build <n|latest>   PaperMC build number or latest (default: latest)
   --keep-raw-image           Keep .img after zstd compression
   --keep-work-dir            Keep mounted work directory after build
   --log-file <path>          Build log file path
@@ -124,6 +128,14 @@ while [[ $# -gt 0 ]]; do
             RPI_MIRROR="${2:?--rpi-mirror requires a value}"
             shift 2
             ;;
+        --paper-mc-version)
+            PAPER_MC_VERSION="${2:?--paper-mc-version requires a value}"
+            shift 2
+            ;;
+        --paper-build)
+            PAPER_BUILD="${2:?--paper-build requires a value}"
+            shift 2
+            ;;
         --keep-raw-image)
             KEEP_RAW_IMAGE=true
             shift
@@ -151,10 +163,7 @@ done
 (( IMAGE_SIZE_GIB >= 8 )) || _fail "--image-size-gib must be >= 8"
 
 case "${CINDER_OS_PROFILE}" in
-    server)
-        ;;
-    desktop)
-        _warn "Desktop profile flag accepted for compatibility; build-image now produces headless server images only"
+    server|desktop)
         ;;
     *)
         _fail "Unsupported profile '${CINDER_OS_PROFILE}' (expected: server|desktop)"
@@ -259,12 +268,15 @@ _step "Provision rootfs in chroot"
 bash "${CHROOT_SETUP_SCRIPT}" \
     --rootfs-dir "${ROOTFS_DIR}" \
     --repo-root "${REPO_ROOT}" \
+    --profile "${CINDER_OS_PROFILE}" \
     --boot-uuid "${BOOT_UUID}" \
     --root-uuid "${ROOT_UUID}" \
     --data-uuid "${DATA_UUID}" \
     --debian-release "${DEBIAN_RELEASE}" \
     --debian-mirror "${DEBIAN_MIRROR}" \
     --rpi-mirror "${RPI_MIRROR}" \
+    --paper-mc-version "${PAPER_MC_VERSION}" \
+    --paper-build "${PAPER_BUILD}" \
     --log-file "${LOG_FILE}"
 
 _pass "Chroot provisioning complete"

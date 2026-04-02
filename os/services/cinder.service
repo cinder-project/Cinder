@@ -1,6 +1,6 @@
 # =============================================================================
 # Cinder OS — cinder.service
-# systemd unit for Cinder Core (compute node)
+# systemd unit for PaperMC Minecraft runtime (compute node)
 #
 # Install path:  /etc/systemd/system/cinder.service
 # Enable:        systemctl enable cinder
@@ -17,18 +17,13 @@
 #     on a correct system clock. Failure here is non-fatal (Want, not Require).
 #
 # Watchdog integration:
-#   systemd's built-in watchdog is enabled (WatchdogSec=90s). Cinder Core
-#   must call sd_notify(WATCHDOG=1) at intervals shorter than WatchdogSec/2
-#   to satisfy the watchdog. If Cinder Core hangs (tick thread deadlock,
-#   OOM-induced freeze), systemd will kill and restart it automatically.
-#
-#   The CinderWatchdogNotifier class (cinder-core) calls sd_notify via
-#   the Java process reaper on a 30-second interval during healthy operation.
+#   PaperMC does not emit sd_notify watchdog pings, so WatchdogSec is disabled
+#   and restart policy is handled by Restart=on-failure.
 #
 # Shutdown behaviour:
 #   On systemctl stop, systemd sends SIGTERM to the launch.sh process.
 #   launch.sh's signal handler forwards SIGTERM to the JVM, which triggers
-#   Cinder Core's shutdown hook (saves world, flushes logs, closes sockets).
+#   PaperMC's normal shutdown sequence (world save, log flush, socket close).
 #   TimeoutStopSec=90s gives the server up to 90 seconds to complete a clean
 #   shutdown before systemd sends SIGKILL. This is generous enough for a
 #   full world save on microSD.
@@ -46,9 +41,8 @@
 #
 # Journal integration:
 #   StandardOutput and StandardError are directed to the journal.
-#   Log lines from Cinder Core's java.util.logging handlers appear in
-#   journalctl with the cinder unit identifier. Structured fields
-#   (TPS, MSPT, tick number) are emitted as SYSLOG_IDENTIFIER=cinder-core.
+#   Log lines from the PaperMC runtime appear in journalctl with
+#   SYSLOG_IDENTIFIER=paper-server.
 #
 # Overrides:
 #   To change the preset or heap without editing this file, use a drop-in:
@@ -63,7 +57,7 @@
 # =============================================================================
 
 [Unit]
-Description=Cinder Core — Minecraft Hosting Runtime
+Description=Cinder PaperMC Runtime - Minecraft Hosting
 Documentation=https://github.com/cinder-project/cinder
 After=network-online.target local-fs.target
 Wants=network-online.target time-sync.target
@@ -92,8 +86,9 @@ Environment=CINDER_PRESET=survival
 Environment=CINDER_BASE_DIR=/opt/cinder
 Environment=CINDER_LOG_DIR=/opt/cinder/logs
 Environment=CINDER_WORLD_DIR=/opt/cinder/world
-Environment=CINDER_JAR=/opt/cinder/cinder-core/build/libs/cinder-core.jar
+Environment=CINDER_JAR=/opt/cinder/server/paper-server.jar
 Environment=CINDER_PRESET_DIR=/opt/cinder/cinder-runtime/presets
+Environment=CINDER_AUTO_ACCEPT_EULA=true
 
 # Java home: point explicitly to the ARM64 JRE to avoid ambiguity if
 # multiple JDKs are installed.
@@ -150,13 +145,9 @@ TimeoutStopSec=90s
 
 # ── systemd Watchdog ───────────────────────────────────────────────────────
 
-# systemd will kill and restart the service if it does not receive a
-# sd_notify(WATCHDOG=1) within this interval. Cinder Core notifies every
-# 30 seconds during healthy operation.
-WatchdogSec=90s
-
-# If the watchdog fires, treat it as a crash and restart.
-NotifyAccess=main
+# The PaperMC process does not emit sd_notify watchdog pings.
+WatchdogSec=0
+NotifyAccess=none
 
 # ── Logging ────────────────────────────────────────────────────────────────
 
@@ -164,7 +155,7 @@ NotifyAccess=main
 # writes to stdout; structured metrics lines are parseable by journalctl.
 StandardOutput=journal
 StandardError=journal
-SyslogIdentifier=cinder-core
+SyslogIdentifier=paper-server
 
 # ── Resource limits ────────────────────────────────────────────────────────
 

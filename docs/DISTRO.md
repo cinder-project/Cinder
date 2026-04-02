@@ -86,7 +86,7 @@ Build options:
 
 | Option | Default | Description |
 |---|---|---|
-| `--version <ver>` | `0.1.0-dev` | Version string embedded in the image name |
+| `--version <ver>` | `1.0.0` | Version string embedded in the image name |
 | `--output-dir <dir>` | `os/build/output/` | Where the finished image is written |
 | `--image-size <gb>` | `8` | Image size in GB (desktop: recommended 8+, server: recommended 6+) |
 | `--profile <desktop\|server>` | `desktop` | Select full GUI profile or headless server profile |
@@ -318,7 +318,7 @@ On your development machine, create the following directory layout on the USB dr
 ```
 /cinder-import/
 ├── plugins/           (Bukkit/Cinder-compatible JAR files)
-├── mods/              (Fabric/Forge-compatible JAR files)
+├── mods/              (Optional mod server payloads; PaperMC deployments typically use plugins/)
 ├── datapacks/         (ZIP files)
 ├── config/            (TOML, YAML, JSON config files)
 └── checksums.sha256   (strongly recommended)
