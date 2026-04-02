@@ -97,6 +97,7 @@ jobs:
             --version "${{ needs.build.outputs.version }}" \
             --output-dir "./os/build/output" \
             --image-size-gib 8 \
+            --profile desktop \
             --paper-mc-version "1.20.1" \
             --paper-build latest
 
@@ -111,7 +112,7 @@ jobs:
             --output-dir ./os/build/output \
             --version "${{ needs.build.outputs.version }}" \
             --build-date "${{ steps.osdate.outputs.build_date }}" \
-            --min-size-gib 1
+            --min-size-gib 2
 
       - name: Remove raw image from artifact set
         run: rm -f ./os/build/output/cinder-os-${{ needs.build.outputs.version }}-arm64.img

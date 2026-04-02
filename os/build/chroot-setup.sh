@@ -33,10 +33,12 @@ readonly SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 : "${ROOTFS_DIR:=}"
 : "${REPO_ROOT:=$(cd "${SCRIPT_DIR}/../.." && pwd)}"
 : "${PACKAGES_MANIFEST:=${SCRIPT_DIR}/packages.list}"
+: "${PACKAGES_DESKTOP_MANIFEST:=${SCRIPT_DIR}/packages-desktop.list}"
 : "${DEBIAN_RELEASE:=bookworm}"
 : "${DEBIAN_MIRROR:=https://deb.debian.org/debian}"
 : "${RPI_MIRROR:=http://archive.raspberrypi.com/debian}"
 : "${TARGET_ARCH:=arm64}"
+: "${CINDER_OS_PROFILE:=desktop}"
 : "${HOSTNAME_VALUE:=cinder}"
 : "${BOOT_UUID:=}"
 : "${ROOT_UUID:=}"
@@ -78,6 +80,7 @@ Required:
 Optional:
   --repo-root <path>       Cinder repository root (default: auto-detect)
   --packages <path>        Package manifest (default: os/build/packages.list)
+    --profile <name>         Build profile: server|desktop (default: desktop)
   --debian-release <name>  Debian release (default: bookworm)
   --debian-mirror <url>    Debian mirror (default: deb.debian.org)
   --rpi-mirror <url>       Raspberry Pi apt mirror
@@ -103,6 +106,10 @@ while [[ $# -gt 0 ]]; do
             ;;
         --packages)
             PACKAGES_MANIFEST="${2:?--packages requires a value}"
+            shift 2
+            ;;
+        --profile)
+            CINDER_OS_PROFILE="${2:?--profile requires a value}"
             shift 2
             ;;
         --debian-release)
@@ -233,6 +240,18 @@ if [[ ! -d "${REPO_ROOT}/os/scripts" ]]; then
     _fail "Repository root does not look like Cinder tree: ${REPO_ROOT}"
 fi
 
+case "${CINDER_OS_PROFILE}" in
+    server|desktop)
+        ;;
+    *)
+        _fail "Unsupported profile '${CINDER_OS_PROFILE}' (expected: server|desktop)"
+        ;;
+esac
+
+if [[ "${CINDER_OS_PROFILE}" == "desktop" && ! -f "${PACKAGES_DESKTOP_MANIFEST}" ]]; then
+    _fail "Desktop package manifest not found: ${PACKAGES_DESKTOP_MANIFEST}"
+fi
+
 HOST_ARCH="$(uname -m)"
 if [[ "${HOST_ARCH}" == "x86_64" ]]; then
     _require_cmd qemu-aarch64-static
@@ -338,6 +357,16 @@ parse_package_manifest() {
 
 PKG_FILE_HOST="$(mktemp)"
 parse_package_manifest "${PACKAGES_MANIFEST}" "${PKG_FILE_HOST}"
+
+if [[ "${CINDER_OS_PROFILE}" == "desktop" ]]; then
+    PKG_DESKTOP_FILE_HOST="$(mktemp)"
+    parse_package_manifest "${PACKAGES_DESKTOP_MANIFEST}" "${PKG_DESKTOP_FILE_HOST}"
+    cat "${PKG_DESKTOP_FILE_HOST}" >> "${PKG_FILE_HOST}"
+    rm -f "${PKG_DESKTOP_FILE_HOST}"
+    _pass "Desktop package profile enabled"
+else
+    _pass "Server package profile enabled"
+fi
 
 cat >> "${PKG_FILE_HOST}" <<'EOF'
 raspberrypi-kernel

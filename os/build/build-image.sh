@@ -28,7 +28,7 @@ readonly REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 : "${RPI_MIRROR:=http://archive.raspberrypi.com/debian}"
 : "${PAPER_MC_VERSION:=1.20.1}"
 : "${PAPER_BUILD:=latest}"
-: "${CINDER_OS_PROFILE:=server}"
+: "${CINDER_OS_PROFILE:=desktop}"
 : "${KEEP_RAW_IMAGE:=false}"
 : "${KEEP_WORK_DIR:=false}"
 
@@ -53,7 +53,7 @@ Options:
   --version <ver>            Version string in output artifact name
   --image-size-gib <int>     Raw image size in GiB (default: 8)
     --image-size <int>         Legacy alias for --image-size-gib
-    --profile <name>           Legacy profile argument (accepted for compatibility)
+    --profile <name>           Build profile: server|desktop (default: desktop)
   --output-dir <path>        Output artifact directory
   --work-dir <path>          Build workspace directory
   --debian-release <name>    Debian release (default: bookworm)
@@ -163,10 +163,7 @@ done
 (( IMAGE_SIZE_GIB >= 8 )) || _fail "--image-size-gib must be >= 8"
 
 case "${CINDER_OS_PROFILE}" in
-    server)
-        ;;
-    desktop)
-        _warn "Desktop profile flag accepted for compatibility; build-image now produces headless server images only"
+    server|desktop)
         ;;
     *)
         _fail "Unsupported profile '${CINDER_OS_PROFILE}' (expected: server|desktop)"
@@ -271,6 +268,7 @@ _step "Provision rootfs in chroot"
 bash "${CHROOT_SETUP_SCRIPT}" \
     --rootfs-dir "${ROOTFS_DIR}" \
     --repo-root "${REPO_ROOT}" \
+    --profile "${CINDER_OS_PROFILE}" \
     --boot-uuid "${BOOT_UUID}" \
     --root-uuid "${ROOT_UUID}" \
     --data-uuid "${DATA_UUID}" \

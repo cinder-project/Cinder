@@ -11,7 +11,7 @@ IFS=$'\n\t'
 : "${VERSION:=}"
 : "${BUILD_DATE:=}"
 : "${ISO_LABEL:=CINDER_OS}"
-: "${MIN_ISO_SIZE_GIB:=1}"
+: "${MIN_ISO_SIZE_GIB:=2}"
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
