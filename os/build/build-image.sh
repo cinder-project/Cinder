@@ -26,6 +26,9 @@ readonly REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 : "${DEBIAN_RELEASE:=bookworm}"
 : "${DEBIAN_MIRROR:=https://deb.debian.org/debian}"
 : "${RPI_MIRROR:=http://archive.raspberrypi.com/debian}"
+: "${FABRIC_MC_VERSION:=1.20.1}"
+: "${FABRIC_LOADER_VERSION:=0.16.9}"
+: "${FABRIC_INSTALLER_VERSION:=1.0.1}"
 : "${CINDER_OS_PROFILE:=server}"
 : "${KEEP_RAW_IMAGE:=false}"
 : "${KEEP_WORK_DIR:=false}"
@@ -57,6 +60,9 @@ Options:
   --debian-release <name>    Debian release (default: bookworm)
   --debian-mirror <url>      Debian mirror URL
   --rpi-mirror <url>         Raspberry Pi archive URL
+    --fabric-mc-version <v>    Fabric target Minecraft version (default: 1.20.1)
+    --fabric-loader <v>        Fabric loader version (default: 0.16.9)
+    --fabric-installer <v>     Fabric installer version (default: 1.0.1)
   --keep-raw-image           Keep .img after zstd compression
   --keep-work-dir            Keep mounted work directory after build
   --log-file <path>          Build log file path
@@ -122,6 +128,18 @@ while [[ $# -gt 0 ]]; do
             ;;
         --rpi-mirror)
             RPI_MIRROR="${2:?--rpi-mirror requires a value}"
+            shift 2
+            ;;
+        --fabric-mc-version)
+            FABRIC_MC_VERSION="${2:?--fabric-mc-version requires a value}"
+            shift 2
+            ;;
+        --fabric-loader)
+            FABRIC_LOADER_VERSION="${2:?--fabric-loader requires a value}"
+            shift 2
+            ;;
+        --fabric-installer)
+            FABRIC_INSTALLER_VERSION="${2:?--fabric-installer requires a value}"
             shift 2
             ;;
         --keep-raw-image)
@@ -265,6 +283,9 @@ bash "${CHROOT_SETUP_SCRIPT}" \
     --debian-release "${DEBIAN_RELEASE}" \
     --debian-mirror "${DEBIAN_MIRROR}" \
     --rpi-mirror "${RPI_MIRROR}" \
+    --fabric-mc-version "${FABRIC_MC_VERSION}" \
+    --fabric-loader "${FABRIC_LOADER_VERSION}" \
+    --fabric-installer "${FABRIC_INSTALLER_VERSION}" \
     --log-file "${LOG_FILE}"
 
 _pass "Chroot provisioning complete"

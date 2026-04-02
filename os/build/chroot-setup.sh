@@ -47,6 +47,9 @@ readonly SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 : "${CINDER_ADMIN_UID:=1002}"
 : "${CINDER_USER:=cinder}"
 : "${CINDER_ADMIN_USER:=cinder-admin}"
+: "${FABRIC_MC_VERSION:=1.20.1}"
+: "${FABRIC_LOADER_VERSION:=0.16.9}"
+: "${FABRIC_INSTALLER_VERSION:=1.0.1}"
 : "${LOG_FILE:=}"
 
 MOUNTED_DIRS=()
@@ -79,6 +82,9 @@ Optional:
   --debian-release <name>  Debian release (default: bookworm)
   --debian-mirror <url>    Debian mirror (default: deb.debian.org)
   --rpi-mirror <url>       Raspberry Pi apt mirror
+    --fabric-mc-version <v>  Fabric target Minecraft version (default: 1.20.1)
+    --fabric-loader <v>      Fabric loader version (default: 0.16.9)
+    --fabric-installer <v>   Fabric installer version (default: 1.0.1)
   --hostname <name>        Base hostname in image (default: cinder)
   --skip-debootstrap       Configure existing rootfs only
   --keep-qemu              Keep qemu-aarch64-static in rootfs after setup
@@ -111,6 +117,18 @@ while [[ $# -gt 0 ]]; do
             ;;
         --rpi-mirror)
             RPI_MIRROR="${2:?--rpi-mirror requires a value}"
+            shift 2
+            ;;
+        --fabric-mc-version)
+            FABRIC_MC_VERSION="${2:?--fabric-mc-version requires a value}"
+            shift 2
+            ;;
+        --fabric-loader)
+            FABRIC_LOADER_VERSION="${2:?--fabric-loader requires a value}"
+            shift 2
+            ;;
+        --fabric-installer)
+            FABRIC_INSTALLER_VERSION="${2:?--fabric-installer requires a value}"
             shift 2
             ;;
         --hostname)
@@ -430,6 +448,7 @@ Cinder OS first-boot customisation files:
   cinder-hostname.txt   -> hostname (single line)
   cinder-pubkey.txt     -> SSH public key for cinder-admin
   cinder-preset.txt     -> startup preset (survival/event/low-power/benchmark/extreme)
+    cinder-eula.txt       -> set to true to auto-accept Minecraft EULA on first boot
   cinder-password.txt   -> initial cinder-admin password (deleted on first boot)
 EOF
 
@@ -442,7 +461,7 @@ mkdir -p \
     "${ROOTFS_DIR}/opt/cinder/cinder-runtime" \
     "${ROOTFS_DIR}/opt/cinder/cinder-control" \
     "${ROOTFS_DIR}/opt/cinder/scripts" \
-    "${ROOTFS_DIR}/opt/cinder/cinder-core" \
+    "${ROOTFS_DIR}/opt/cinder/server" \
     "${ROOTFS_DIR}/opt/cinder/dashboard"
 
 rsync -a --delete "${REPO_ROOT}/cinder-runtime/" "${ROOTFS_DIR}/opt/cinder/cinder-runtime/"
@@ -481,14 +500,24 @@ if [[ -f "${REPO_ROOT}/os/rootfs/etc/systemd/system/cinder-ota.timer" ]]; then
     install -m 0644 "${REPO_ROOT}/os/rootfs/etc/systemd/system/cinder-ota.timer" "${ROOTFS_DIR}/etc/systemd/system/cinder-ota.timer"
 fi
 
-JAR_CANDIDATE=""
-if compgen -G "${REPO_ROOT}/build/libs/cinder-*-all.jar" >/dev/null; then
-    JAR_CANDIDATE="$(ls -1 "${REPO_ROOT}"/build/libs/cinder-*-all.jar | head -1)"
-    install -m 0644 "${JAR_CANDIDATE}" "${ROOTFS_DIR}/opt/cinder/cinder-core/cinder-core.jar"
-    _pass "Installed runtime jar: $(basename "${JAR_CANDIDATE}")"
+FABRIC_URL="https://meta.fabricmc.net/v2/versions/loader/${FABRIC_MC_VERSION}/${FABRIC_LOADER_VERSION}/${FABRIC_INSTALLER_VERSION}/server/jar"
+if curl -fsSL --retry 5 --retry-delay 2 --retry-all-errors "${FABRIC_URL}" -o "${ROOTFS_DIR}/opt/cinder/server/fabric-server-launch.jar"; then
+    _pass "Fabric launcher installed (mc=${FABRIC_MC_VERSION}, loader=${FABRIC_LOADER_VERSION}, installer=${FABRIC_INSTALLER_VERSION})"
 else
-    _warn "No built fat jar found in build/libs; image will require jar injection/update before first launch"
+    _fail "Unable to download Fabric launcher jar from ${FABRIC_URL}"
 fi
+
+cat > "${ROOTFS_DIR}/opt/cinder/eula.txt" <<'EOF'
+eula=false
+EOF
+
+cat > "${ROOTFS_DIR}/opt/cinder/server.properties" <<'EOF'
+motd=Cinder OS Fabric Host
+view-distance=8
+simulation-distance=6
+enable-rcon=false
+max-tick-time=60000
+EOF
 
 find "${ROOTFS_DIR}/opt/cinder/scripts" -type f -name '*.sh' -exec chmod 0750 {} \;
 

@@ -135,6 +135,7 @@ _pass "Log file: ${LOG_FILE}"
 CUSTOM_HOSTNAME="$(_read_boot_value cinder-hostname.txt)"
 CUSTOM_PUBKEY="$(_read_boot_value cinder-pubkey.txt)"
 CUSTOM_PRESET="$(_read_boot_value cinder-preset.txt)"
+CUSTOM_EULA="$(_read_boot_value cinder-eula.txt)"
 CUSTOM_PASSWORD="$(_read_boot_value cinder-password.txt)"
 
 HOSTNAME_VALUE="${CUSTOM_HOSTNAME:-cinder}"
@@ -156,7 +157,7 @@ mkdir -p \
     "${DATA_DIR}/downloads" \
     "${DATA_DIR}/metrics"
 
-mkdir -p "${CINDER_BASE}" "${CINDER_BASE}/cinder-core" "${CINDER_BASE}/config" "${CINDER_BASE}/scripts"
+mkdir -p "${CINDER_BASE}" "${CINDER_BASE}/server" "${CINDER_BASE}/config" "${CINDER_BASE}/scripts"
 
 for name in world logs backups staging plugins mods resourcepacks downloads metrics; do
     if [[ ! -L "${CINDER_BASE}/${name}" ]]; then
@@ -214,6 +215,36 @@ EOF
 else
     _warn "Invalid preset '${PRESET_VALUE}' ignored; keeping service default"
 fi
+
+EULA_VALUE_RAW="${CUSTOM_EULA:-true}"
+EULA_VALUE="$(echo "${EULA_VALUE_RAW}" | tr '[:upper:]' '[:lower:]')"
+case "${EULA_VALUE}" in
+    1|yes|true)
+        EULA_AUTO_ACCEPT="true"
+        ;;
+    0|no|false)
+        EULA_AUTO_ACCEPT="false"
+        ;;
+    *)
+        EULA_AUTO_ACCEPT="true"
+        _warn "Invalid cinder-eula.txt value '${EULA_VALUE_RAW}', defaulting to auto-accept"
+        ;;
+esac
+
+cat > /etc/systemd/system/cinder.service.d/eula.conf <<EOF
+[Service]
+Environment=CINDER_AUTO_ACCEPT_EULA=${EULA_AUTO_ACCEPT}
+EOF
+
+if [[ "${EULA_AUTO_ACCEPT}" == "true" ]]; then
+    echo "eula=true" > "${CINDER_BASE}/eula.txt"
+    _pass "EULA auto-accept enabled"
+else
+    echo "eula=false" > "${CINDER_BASE}/eula.txt"
+    _warn "EULA auto-accept disabled; set ${CINDER_BASE}/eula.txt to eula=true before start"
+fi
+
+rm -f "${BOOT_DIR}/cinder-eula.txt"
 
 _step "Configuring SSH hardening and key provisioning"
 mkdir -p /etc/ssh/sshd_config.d

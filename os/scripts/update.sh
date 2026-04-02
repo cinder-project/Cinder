@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # =============================================================================
 # Cinder OS — update.sh
-# Safe Cinder Core JAR update with pre-update backup, rollback slot, and
+# Safe Fabric launcher JAR update with pre-update backup, rollback slot, and
 # optional service restart
 #
 # Responsibilities:
@@ -14,7 +14,7 @@
 # Usage:
 #   ./update.sh --jar <path-to-new-jar> [--restart] [--dry-run]
 #
-#   --jar <path>    Path to the new cinder-*.jar to deploy (required)
+#   --jar <path>    Path to the new fabric launcher jar to deploy (required)
 #   --restart       Restart cinder.service after successful update
 #   --dry-run       Validate and print actions without writing anything
 #
@@ -25,10 +25,10 @@
 #
 # Rollback:
 #   The previous JAR is preserved at:
-#     ${CINDER_JAR_DIR}/cinder-core.jar.rollback
+#     ${CINDER_JAR}.rollback
 #   To restore manually:
-#     cp /opt/cinder/cinder-core/cinder-core.jar.rollback \
-#        /opt/cinder/cinder-core/cinder-core.jar
+#     cp /opt/cinder/server/fabric-server-launch.jar.rollback \
+#        /opt/cinder/server/fabric-server-launch.jar
 #     systemctl restart cinder
 # =============================================================================
 
@@ -38,8 +38,8 @@ IFS=$'\n\t'
 # ── Configuration ─────────────────────────────────────────────────────────────
 
 : "${CINDER_BASE_DIR:=/opt/cinder}"
-: "${CINDER_JAR_DIR:=${CINDER_BASE_DIR}/cinder-core}"
-: "${CINDER_JAR:=${CINDER_JAR_DIR}/cinder-core.jar}"
+: "${CINDER_JAR_DIR:=${CINDER_BASE_DIR}/server}"
+: "${CINDER_JAR:=${CINDER_JAR_DIR}/fabric-server-launch.jar}"
 : "${CINDER_STAGING_DIR:=${CINDER_BASE_DIR}/staging}"
 : "${CINDER_LOG_DIR:=${CINDER_BASE_DIR}/logs}"
 : "${JAVA_HOME:=/usr/lib/jvm/java-21-openjdk-arm64}"
@@ -82,7 +82,7 @@ _fail() {
     exit 1
 }
 
-_log "Cinder update starting — source=${NEW_JAR}"
+_log "Fabric update starting — source=${NEW_JAR}"
 [[ "${DRY_RUN}" == true ]] && _log "Dry-run mode — no files will be written"
 
 # ── Validate incoming JAR ─────────────────────────────────────────────────────
@@ -166,7 +166,7 @@ fi
 
 mkdir -p "${CINDER_STAGING_DIR}" "${CINDER_JAR_DIR}"
 
-STAGING_JAR="${CINDER_STAGING_DIR}/cinder-core-${TIMESTAMP}.jar"
+STAGING_JAR="${CINDER_STAGING_DIR}/fabric-server-launch-${TIMESTAMP}.jar"
 
 _log "Copying to staging: ${STAGING_JAR}"
 if ! cp "${NEW_JAR}" "${STAGING_JAR}"; then

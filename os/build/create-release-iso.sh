@@ -11,6 +11,7 @@ IFS=$'\n\t'
 : "${VERSION:=}"
 : "${BUILD_DATE:=}"
 : "${ISO_LABEL:=CINDER_OS}"
+: "${MIN_ISO_SIZE_GIB:=1}"
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -28,6 +29,10 @@ while [[ $# -gt 0 ]]; do
             ;;
         --iso-label)
             ISO_LABEL="${2:?--iso-label requires a value}"
+            shift 2
+            ;;
+        --min-size-gib)
+            MIN_ISO_SIZE_GIB="${2:?--min-size-gib requires a value}"
             shift 2
             ;;
         -h|--help)
@@ -50,6 +55,11 @@ if [[ -z "${BUILD_DATE}" ]]; then
     BUILD_DATE="$(date -u +%Y%m%d)"
 fi
 
+if [[ ! "${MIN_ISO_SIZE_GIB}" =~ ^[0-9]+$ ]]; then
+    echo "[create-release-iso] --min-size-gib must be an integer" >&2
+    exit 1
+fi
+
 if ! command -v xorriso >/dev/null 2>&1; then
     echo "[create-release-iso] xorriso is required (apt install xorriso)" >&2
     exit 1
@@ -66,6 +76,7 @@ ISO_NAME="${IMAGE_BASENAME}-bundle.iso"
 ISO_PATH="${OUTPUT_DIR}/${ISO_NAME}"
 STAGE_DIR="${OUTPUT_DIR}/iso-staging"
 
+rm -rf "${STAGE_DIR}"
 mkdir -p "${STAGE_DIR}"
 
 copy_if_exists() {
@@ -103,6 +114,19 @@ Build Date: ${BUILD_DATE}
 This ISO contains compressed image artifacts and checksums.
 Preferred format is .img.zst; .img.xz is included when available for compatibility.
 EOF
+
+if (( MIN_ISO_SIZE_GIB > 0 )); then
+    TARGET_BYTES=$(( MIN_ISO_SIZE_GIB * 1024 * 1024 * 1024 ))
+    CURRENT_BYTES="$(du -sb "${STAGE_DIR}" | awk '{print $1}')"
+
+    if (( CURRENT_BYTES < TARGET_BYTES )); then
+        PAD_BYTES=$(( TARGET_BYTES - CURRENT_BYTES ))
+        truncate -s "${PAD_BYTES}" "${STAGE_DIR}/bundle-padding.bin"
+        echo >> "${STAGE_DIR}/README.txt"
+        echo "This bundle contains padding to satisfy a minimum ISO size of ${MIN_ISO_SIZE_GIB} GiB." >> "${STAGE_DIR}/README.txt"
+        echo "[create-release-iso] Added padding file (${PAD_BYTES} bytes)" 
+    fi
+fi
 
 xorriso -as mkisofs \
     -V "${ISO_LABEL}" \

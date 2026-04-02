@@ -76,7 +76,7 @@ IFS=$'\n\t'
 readonly SCRIPT_VERSION="0.1.0"
 readonly SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-# Server directories — must match the paths used by Cinder Core and launch.sh
+# Server directories — must match the paths used by the Fabric runtime and launch.sh
 : "${CINDER_BASE_DIR:="/opt/cinder"}"
 : "${SERVER_PLUGINS_DIR:="${CINDER_BASE_DIR}/plugins"}"
 : "${SERVER_MODS_DIR:="${CINDER_BASE_DIR}/mods"}"

@@ -163,7 +163,8 @@ jobs:
           ./os/build/create-release-iso.sh \
             --output-dir ./os/build/output \
             --version "${{ needs.build.outputs.version }}" \
-            --build-date "${{ steps.osdate.outputs.build_date }}"
+            --build-date "${{ steps.osdate.outputs.build_date }}" \
+            --min-size-gib 1
 
       - name: Remove raw image from artifact set
         run: rm -f ./os/build/output/cinder-os-${{ needs.build.outputs.version }}-arm64.img
