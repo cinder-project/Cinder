@@ -1,0 +1,13 @@
+[Unit]
+Description=Run Cinder OTA check every 6 hours
+
+[Timer]
+OnBootSec=15min
+OnUnitActiveSec=6h
+AccuracySec=5min
+RandomizedDelaySec=2min
+Persistent=true
+Unit=cinder-ota.service
+
+[Install]
+WantedBy=timers.target

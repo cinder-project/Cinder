@@ -1,0 +1,68 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Cinder Dashboard</title>
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+  <main class="app-shell">
+    <header class="topbar">
+      <div>
+        <h1>Cinder Runtime</h1>
+        <p id="subtitle">Live host and tick telemetry</p>
+      </div>
+      <div class="badge-row">
+        <span class="badge" id="state-badge">state: unknown</span>
+        <span class="badge" id="uptime-badge">uptime: 0s</span>
+      </div>
+    </header>
+
+    <section class="metrics-grid" aria-label="core metrics">
+      <article class="metric-card">
+        <h2>TPS</h2>
+        <p id="tps" class="metric-value">0.000</p>
+      </article>
+      <article class="metric-card">
+        <h2>MSPT p50</h2>
+        <p id="mspt-p50" class="metric-value">0.000</p>
+      </article>
+      <article class="metric-card">
+        <h2>MSPT p95</h2>
+        <p id="mspt-p95" class="metric-value">0.000</p>
+      </article>
+      <article class="metric-card">
+        <h2>MSPT p99</h2>
+        <p id="mspt-p99" class="metric-value">0.000</p>
+      </article>
+      <article class="metric-card">
+        <h2>Players</h2>
+        <p id="players" class="metric-value">0</p>
+      </article>
+      <article class="metric-card">
+        <h2>CPU Temp</h2>
+        <p id="cpu-temp" class="metric-value">0.0 C</p>
+      </article>
+      <article class="metric-card">
+        <h2>Memory</h2>
+        <p id="memory" class="metric-value">0 / 0</p>
+      </article>
+      <article class="metric-card">
+        <h2>Disk</h2>
+        <p id="disk" class="metric-value">0 / 0</p>
+      </article>
+    </section>
+
+    <section class="logs-panel" aria-label="recent logs">
+      <div class="panel-header">
+        <h2>Last 50 log lines</h2>
+        <span id="updated-at">updated: --</span>
+      </div>
+      <pre id="log-lines" class="logs">waiting for metrics...</pre>
+    </section>
+  </main>
+
+  <script src="/cinder.js" defer></script>
+</body>
+</html>

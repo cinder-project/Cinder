@@ -1,0 +1,22 @@
+[Unit]
+Description=Cinder OTA update check and apply
+Documentation=https://github.com/cinder-project/Cinder
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/opt/cinder/cinder-control/ota/ota-daemon.sh
+User=root
+Group=root
+Nice=10
+IOSchedulingClass=best-effort
+IOSchedulingPriority=6
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/opt/cinder /data/staging /data/logs
+
+[Install]
+WantedBy=multi-user.target

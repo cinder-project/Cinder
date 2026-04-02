@@ -4,6 +4,7 @@ import dev.cinder.chunk.ChunkLifecycleManager;
 import dev.cinder.chunk.ChunkPosition;
 import dev.cinder.chunk.CinderChunk;
 import dev.cinder.entity.EntityUpdatePipeline;
+import dev.cinder.network.CinderDashboardServer;
 import dev.cinder.network.CinderNetworkManager;
 import dev.cinder.plugin.CinderEventBus;
 import dev.cinder.plugin.command.CinderCommandRegistry;
@@ -112,6 +113,7 @@ public final class CinderServer {
     private final CinderTickLoop         tickLoop;
     private final CinderWatchdogNotifier watchdog;
     private final CinderNetworkManager   networkManager;
+    private final CinderDashboardServer  dashboardServer;
     private final CinderEventBus         eventBus;
     private final CinderCommandRegistry  commandRegistry;
     private final CinderPluginLoader     pluginLoader;
@@ -195,6 +197,14 @@ public final class CinderServer {
         this.tickLoop.setPluginEventBus(eventBus);
         this.tickLoop.setNetworkManager(networkManager);
 
+        try {
+            this.dashboardServer = CinderDashboardServer.createDefault(
+                this::getStats,
+                networkManager::getConnectionCount);
+        } catch (IOException e) {
+            throw new RuntimeException("[CinderServer] Failed to initialise dashboard server", e);
+        }
+
         this.presetName = System.getProperty("cinder.preset", "unknown");
         this.logDir = System.getProperty("cinder.logDir", "logs");
         this.runtimeConfigPath = System.getProperty(PROP_RUNTIME_CONFIG_PATH, "");
@@ -242,6 +252,8 @@ public final class CinderServer {
             throw new RuntimeException("[CinderServer] Failed to start network manager", e);
         }
 
+        dashboardServer.start();
+
         pluginLoader.loadAll();
 
         state.set(State.RUNNING);
@@ -287,6 +299,7 @@ public final class CinderServer {
 
         LOG.info("[CinderServer] Tick loop stopped after " + tickLoop.getTickCount() + " ticks.");
 
+        dashboardServer.stop();
         networkManager.stop();
         pluginLoader.shutdown();
         chunkManager.shutdown();

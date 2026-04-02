@@ -1,0 +1,30 @@
+# Cinder OS - Raspberry Pi 4 / Pi 400 boot configuration
+# Headless server defaults: low GPU memory, radios off, watchdog on.
+
+[pi4]
+# 64-bit kernel/userland.
+arm_64bit=1
+
+# Keep memory available for JVM/server workloads.
+gpu_mem=16
+
+# Headless profile: do not force a display pipeline.
+hdmi_force_hotplug=0
+
+# Server profile defaults: radios disabled.
+dtoverlay=disable-wifi
+dtoverlay=disable-bt
+
+# Enable BCM2835 hardware watchdog.
+dtparam=watchdog=on
+
+[all]
+# Serial console for headless boot diagnostics.
+enable_uart=1
+
+# Remove splash for cleaner boot logs.
+disable_splash=1
+
+# USB boot priority is controlled by Pi EEPROM BOOT_ORDER.
+# Recommended Cinder value:
+#   BOOT_ORDER=0xf14
