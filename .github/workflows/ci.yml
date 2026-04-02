@@ -199,7 +199,13 @@ jobs:
             "dist-os/OS-SHA256SUMS"
           )
 
+          MAX_RELEASE_ASSET_BYTES=2147483648
           while IFS= read -r file; do
+            FILE_SIZE=$(stat -c%s "$file")
+            if (( FILE_SIZE >= MAX_RELEASE_ASSET_BYTES )); then
+              echo "::warning::Skipping ${file} (${FILE_SIZE} bytes). GitHub release assets must be smaller than ${MAX_RELEASE_ASSET_BYTES} bytes."
+              continue
+            fi
             ASSETS+=("$file")
           done < <(find dist-os -maxdepth 1 -type f ! -name 'SHA256SUMS' ! -name 'OS-SHA256SUMS' | sort)
 
