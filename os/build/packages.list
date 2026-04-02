@@ -56,7 +56,6 @@ dbus                        # Required by systemd for unit communication
 udev                        # Device manager — required for USB hotplug detection
 login                       # login, nologin, getty
 passwd                      # useradd, usermod, chpasswd
-shadow                      # /etc/shadow support for passwd
 sudo                        # Admin privilege escalation for cinder-admin user
 less                        # Pager for log review
 nano                        # Minimal editor for on-device config editing
@@ -182,8 +181,7 @@ libcap2-bin                 # setcap — used to grant CAP_NET_BIND_SERVICE to J
 # Packages required by Cinder's own shell scripts (launch.sh, usb-import.sh,
 # backup scripts, health-check.sh, build-image.sh).
 
-util-linux                  # Already listed; noted here: taskset, ionice are in util-linux
-schedutils                  # chrt — real-time scheduling tool; used by extreme preset tuning
+util-linux                  # Already listed; noted here: taskset, ionice, chrt are in util-linux
 cpufrequtils                # cpufreq-set, cpufreq-info — CPU governor management
                             # Used by prestart-check.sh for extreme/benchmark presets
 tmux                        # Terminal multiplexer — allows admin to attach to running sessions

@@ -278,6 +278,7 @@ cat > "${ROOTFS_DIR}/etc/apt/sources.list" <<EOF
 # Cinder OS Debian package sources
 deb ${DEBIAN_MIRROR} ${DEBIAN_RELEASE} main contrib non-free non-free-firmware
 deb ${DEBIAN_MIRROR} ${DEBIAN_RELEASE}-updates main contrib non-free non-free-firmware
+deb ${DEBIAN_MIRROR} ${DEBIAN_RELEASE}-backports main contrib non-free non-free-firmware
 deb http://security.debian.org/debian-security ${DEBIAN_RELEASE}-security main contrib non-free non-free-firmware
 EOF
 
@@ -302,13 +303,20 @@ parse_package_manifest() {
     local out_file="$2"
 
     awk '
+        function normalize_package_name(pkg) {
+            # Keep compatibility with legacy manifests that used non-Debian names.
+            if (pkg == "shadow") return "passwd"
+            if (pkg == "schedutils") return "util-linux"
+            return pkg
+        }
+
         {
             line=$0
             sub(/#.*/, "", line)
             gsub(/^[ \t]+|[ \t]+$/, "", line)
             if (line == "") next
             if (line ~ /^(SECTION:|EXCLUDE:|BUILD_ONLY:)/) next
-            print line
+            print normalize_package_name(line)
         }
     ' "${manifest_path}" | sort -u > "${out_file}"
 }
