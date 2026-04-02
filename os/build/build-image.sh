@@ -240,10 +240,12 @@ DATA_UUID="$(blkid -s UUID -o value "${DATA_PART}")"
 
 _step "Mount rootfs"
 rm -rf "${ROOTFS_DIR}"
-mkdir -p "${ROOTFS_DIR}" "${ROOTFS_DIR}/boot/firmware" "${ROOTFS_DIR}/data"
+mkdir -p "${ROOTFS_DIR}"
 
 mount "${ROOT_PART}" "${ROOTFS_DIR}"
 MOUNTED_DIRS+=("${ROOTFS_DIR}")
+
+mkdir -p "${ROOTFS_DIR}/boot/firmware" "${ROOTFS_DIR}/data"
 
 mount "${BOOT_PART}" "${ROOTFS_DIR}/boot/firmware"
 MOUNTED_DIRS+=("${ROOTFS_DIR}/boot/firmware")
