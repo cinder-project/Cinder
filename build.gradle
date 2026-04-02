@@ -3,7 +3,7 @@ plugins {
 }
 
 group   = 'dev.cinder'
-version = System.getenv('CINDER_VERSION') ?: 'dev'
+version = System.getenv('CINDER_VERSION') ?: '1.0.0'
 
 java {
     toolchain {

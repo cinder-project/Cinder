@@ -1,19 +1,19 @@
 #!/usr/bin/env bash
 # =============================================================================
 # Cinder Runtime - launch.sh
-# Fabric server launcher for Raspberry Pi focused Cinder OS images.
+# PaperMC server launcher for Raspberry Pi focused Cinder OS images.
 # =============================================================================
 
 set -euo pipefail
 IFS=$'\n\t'
 
-readonly CINDER_VERSION="0.2.0-dev"
+readonly CINDER_VERSION="1.0.0"
 readonly SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 readonly SCRIPT_NAME="$(basename "${BASH_SOURCE[0]}")"
 readonly LAUNCH_TIMESTAMP="$(date -u +%Y%m%dT%H%M%SZ)"
 
 : "${CINDER_BASE_DIR:="${SCRIPT_DIR}/../.."}"
-: "${CINDER_JAR:="${CINDER_BASE_DIR}/server/fabric-server-launch.jar"}"
+: "${CINDER_JAR:="${CINDER_BASE_DIR}/server/paper-server.jar"}"
 : "${CINDER_LOG_DIR:="${CINDER_BASE_DIR}/logs"}"
 : "${CINDER_PRESET_DIR:="${SCRIPT_DIR}/../presets"}"
 : "${CINDER_LAUNCH_CWD:="${CINDER_BASE_DIR}"}"
@@ -23,7 +23,7 @@ readonly LAUNCH_TIMESTAMP="$(date -u +%Y%m%dT%H%M%SZ)"
 : "${CINDER_HEAP_MAX:="2g"}"
 : "${CINDER_PRESET:="survival"}"
 : "${CINDER_AUTO_ACCEPT_EULA:="true"}"
-: "${FABRIC_SERVER_ARGS:="nogui"}"
+: "${PAPER_SERVER_ARGS:="nogui"}"
 
 readonly WATCHDOG_MAX_RESTARTS=5
 readonly WATCHDOG_RESTART_DELAY_S=10
@@ -47,8 +47,8 @@ while [[ $# -gt 0 ]]; do
             OPT_DEBUG=true; shift ;;
         --accept-eula)
             OPT_ACCEPT_EULA=true; shift ;;
-        --fabric-args)
-            FABRIC_SERVER_ARGS="${2:?--fabric-args requires a value}"; shift 2 ;;
+        --paper-args)
+            PAPER_SERVER_ARGS="${2:?--paper-args requires a value}"; shift 2 ;;
         --heap-max)
             CINDER_HEAP_MAX="${2:?--heap-max requires a value}"; shift 2 ;;
         --heap-min)
@@ -64,7 +64,7 @@ Options:
   --no-watchdog          Disable restart loop
   --debug                Enable JVM debug port 5005
   --accept-eula          Write eula=true before launch
-  --fabric-args <args>   Extra Fabric args string (default: nogui)
+    --paper-args <args>    Extra PaperMC args string (default: nogui)
   --heap-min <size>      Minimum JVM heap (e.g. 512m)
   --heap-max <size>      Maximum JVM heap (e.g. 2g)
 EOF
@@ -82,7 +82,7 @@ log()  { local m="[$(date -u +%H:%M:%S)] [launch] $*"; echo "${m}"; echo "${m}" 
 warn() { local m="[$(date -u +%H:%M:%S)] [launch:WARN] $*"; echo "${m}" >&2; echo "${m}" >> "${LAUNCH_LOG}"; }
 die()  { local m="[$(date -u +%H:%M:%S)] [launch:FATAL] $*"; echo "${m}" >&2; echo "${m}" >> "${LAUNCH_LOG}"; exit 1; }
 
-log "Cinder Runtime ${CINDER_VERSION} - Fabric launch starting"
+log "Cinder Runtime ${CINDER_VERSION} - PaperMC launch starting"
 log "Preset: ${OPT_PRESET} | dry-run: ${OPT_DRY_RUN} | watchdog: $( [[ "${OPT_NO_WATCHDOG}" == true ]] && echo disabled || echo enabled )"
 
 PRESET_FILE="${CINDER_PRESET_DIR}/${OPT_PRESET}.conf"
@@ -112,7 +112,7 @@ fi
 log "Java: ${JAVA_VERSION_OUTPUT} (major=${JAVA_MAJOR})"
 
 if [[ ! -f "${CINDER_JAR}" ]]; then
-    die "Fabric launcher jar not found: ${CINDER_JAR}"
+    die "PaperMC server jar not found: ${CINDER_JAR}"
 fi
 
 if [[ ! -d "${CINDER_LAUNCH_CWD}" ]]; then
@@ -189,10 +189,10 @@ if [[ -n "${PRESET_EXTRA_FLAGS:-}" ]]; then
     PRESET_EXTRA_ARR=(${PRESET_EXTRA_FLAGS})
 fi
 
-FABRIC_ARGS_ARR=()
-if [[ -n "${FABRIC_SERVER_ARGS}" ]]; then
+PAPER_ARGS_ARR=()
+if [[ -n "${PAPER_SERVER_ARGS}" ]]; then
     # shellcheck disable=SC2206
-    FABRIC_ARGS_ARR=(${FABRIC_SERVER_ARGS})
+    PAPER_ARGS_ARR=(${PAPER_SERVER_ARGS})
 fi
 
 JVM_ARGS=(
@@ -203,14 +203,14 @@ JVM_ARGS=(
     "${PRESET_EXTRA_ARR[@]}"
 )
 
-SERVER_LOG="${CINDER_LOG_DIR}/fabric-server.log"
+SERVER_LOG="${CINDER_LOG_DIR}/paper-server.log"
 if [[ -s "${SERVER_LOG}" ]]; then
-    ROTATED="${CINDER_LOG_DIR}/fabric-server-$(date -u +%Y%m%dT%H%M%SZ).log.gz"
+    ROTATED="${CINDER_LOG_DIR}/paper-server-$(date -u +%Y%m%dT%H%M%SZ).log.gz"
     gzip -c "${SERVER_LOG}" > "${ROTATED}" && : > "${SERVER_LOG}"
     log "Rotated previous server log -> ${ROTATED}"
 fi
 
-find "${CINDER_LOG_DIR}" -name "fabric-server-*.log.gz" -mtime +14 -delete 2>/dev/null || true
+find "${CINDER_LOG_DIR}" -name "paper-server-*.log.gz" -mtime +14 -delete 2>/dev/null || true
 
 if [[ "${OPT_DRY_RUN}" == true ]]; then
     log "=== DRY RUN - resolved launch configuration ==="
@@ -221,7 +221,7 @@ if [[ "${OPT_DRY_RUN}" == true ]]; then
     log "Preset:       ${OPT_PRESET} (${PRESET_FILE})"
     log "Heap:         ${CINDER_HEAP_MIN} - ${CINDER_HEAP_MAX}"
     log "CPU affinity: ${CPU_AFFINITY}"
-    log "Fabric args:  ${FABRIC_SERVER_ARGS}"
+    log "Paper args:   ${PAPER_SERVER_ARGS}"
     log "JVM args:"
     for flag in "${JVM_ARGS[@]}"; do
         log "  ${flag}"
@@ -246,18 +246,18 @@ trap 'handle_stop_signal' INT
 
 launch_server() {
     log "----------------------------------------------"
-    log "Launching Fabric server"
+    log "Launching PaperMC server"
     log "  Jar:       ${CINDER_JAR}"
     log "  Preset:    ${OPT_PRESET}"
     log "  Heap:      ${CINDER_HEAP_MIN} - ${CINDER_HEAP_MAX}"
     log "  Affinity:  ${CPU_AFFINITY}"
     log "  CWD:       ${CINDER_LAUNCH_CWD}"
-    log "  Arguments: ${FABRIC_SERVER_ARGS}"
+    log "  Arguments: ${PAPER_SERVER_ARGS}"
     log "----------------------------------------------"
 
     cat > "${CINDER_LOG_DIR}/last-launch.json" <<EOF
 {
-  "runtime": "fabric",
+    "runtime": "papermc",
   "cinderVersion": "${CINDER_VERSION}",
   "preset": "${OPT_PRESET}",
   "heapMin": "${CINDER_HEAP_MIN}",
@@ -267,7 +267,7 @@ launch_server() {
   "launchTime": "${LAUNCH_TIMESTAMP}",
   "jar": "${CINDER_JAR}",
   "launchCwd": "${CINDER_LAUNCH_CWD}",
-  "fabricArgs": "${FABRIC_SERVER_ARGS}"
+    "paperArgs": "${PAPER_SERVER_ARGS}"
 }
 EOF
 
@@ -277,7 +277,7 @@ EOF
         ionice -c 1 -n 2
         java "${JVM_ARGS[@]}"
         -jar "${CINDER_JAR}"
-        "${FABRIC_ARGS_ARR[@]}"
+        "${PAPER_ARGS_ARR[@]}"
     )
 
     (
