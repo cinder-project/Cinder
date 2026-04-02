@@ -13,7 +13,7 @@ if [[ ! -d "${ARTIFACT_DIR}" ]]; then
 fi
 
 mapfile -t FILES < <(
-    find "${ARTIFACT_DIR}" -maxdepth 1 -type f \( -name '*.jar' -o -name '*.img' -o -name '*.img.xz' -o -name '*.iso' \) | sort
+    find "${ARTIFACT_DIR}" -maxdepth 1 -type f \( -name '*.jar' -o -name '*.img' -o -name '*.img.xz' -o -name '*.img.zst' -o -name '*.iso' \) | sort
 )
 
 if [[ ${#FILES[@]} -eq 0 ]]; then

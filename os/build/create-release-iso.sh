@@ -60,7 +60,8 @@ if [[ ! -d "${OUTPUT_DIR}" ]]; then
     exit 1
 fi
 
-IMAGE_BASENAME="cinder-os-${VERSION}-${BUILD_DATE}"
+IMAGE_BASENAME="cinder-os-${VERSION}-arm64"
+LEGACY_IMAGE_BASENAME="cinder-os-${VERSION}-${BUILD_DATE}"
 ISO_NAME="${IMAGE_BASENAME}-bundle.iso"
 ISO_PATH="${OUTPUT_DIR}/${ISO_NAME}"
 STAGE_DIR="${OUTPUT_DIR}/iso-staging"
@@ -74,9 +75,17 @@ copy_if_exists() {
     fi
 }
 
+copy_if_exists "${OUTPUT_DIR}/${IMAGE_BASENAME}.img.zst"
+copy_if_exists "${OUTPUT_DIR}/${IMAGE_BASENAME}.img.zst.sha256"
 copy_if_exists "${OUTPUT_DIR}/${IMAGE_BASENAME}.img.xz"
 copy_if_exists "${OUTPUT_DIR}/${IMAGE_BASENAME}.img.xz.sha256"
 copy_if_exists "${OUTPUT_DIR}/${IMAGE_BASENAME}.img.sha256"
+
+copy_if_exists "${OUTPUT_DIR}/${LEGACY_IMAGE_BASENAME}.img.zst"
+copy_if_exists "${OUTPUT_DIR}/${LEGACY_IMAGE_BASENAME}.img.zst.sha256"
+copy_if_exists "${OUTPUT_DIR}/${LEGACY_IMAGE_BASENAME}.img.xz"
+copy_if_exists "${OUTPUT_DIR}/${LEGACY_IMAGE_BASENAME}.img.xz.sha256"
+copy_if_exists "${OUTPUT_DIR}/${LEGACY_IMAGE_BASENAME}.img.sha256"
 copy_if_exists "${OUTPUT_DIR}/SHA256SUMS"
 
 if [[ -z "$(find "${STAGE_DIR}" -maxdepth 1 -type f -print -quit)" ]]; then
@@ -92,7 +101,7 @@ Version: ${VERSION}
 Build Date: ${BUILD_DATE}
 
 This ISO contains compressed image artifacts and checksums.
-Use the .img.xz file with Raspberry Pi Imager or decompress and write with dd.
+Preferred format is .img.zst; .img.xz is included when available for compatibility.
 EOF
 
 xorriso -as mkisofs \

@@ -26,6 +26,7 @@ readonly REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 : "${DEBIAN_RELEASE:=bookworm}"
 : "${DEBIAN_MIRROR:=https://deb.debian.org/debian}"
 : "${RPI_MIRROR:=http://archive.raspberrypi.com/debian}"
+: "${CINDER_OS_PROFILE:=server}"
 : "${KEEP_RAW_IMAGE:=false}"
 : "${KEEP_WORK_DIR:=false}"
 
@@ -49,6 +50,8 @@ Usage:
 Options:
   --version <ver>            Version string in output artifact name
   --image-size-gib <int>     Raw image size in GiB (default: 8)
+    --image-size <int>         Legacy alias for --image-size-gib
+    --profile <name>           Legacy profile argument (accepted for compatibility)
   --output-dir <path>        Output artifact directory
   --work-dir <path>          Build workspace directory
   --debian-release <name>    Debian release (default: bookworm)
@@ -93,8 +96,12 @@ while [[ $# -gt 0 ]]; do
             CINDER_OS_VERSION="${2:?--version requires a value}"
             shift 2
             ;;
-        --image-size-gib)
+        --image-size-gib|--image-size)
             IMAGE_SIZE_GIB="${2:?--image-size-gib requires a value}"
+            shift 2
+            ;;
+        --profile)
+            CINDER_OS_PROFILE="${2:?--profile requires a value}"
             shift 2
             ;;
         --output-dir)
@@ -142,6 +149,17 @@ done
 [[ "${EUID}" -eq 0 ]] || _fail "Must run as root"
 [[ "${IMAGE_SIZE_GIB}" =~ ^[0-9]+$ ]] || _fail "--image-size-gib must be an integer"
 (( IMAGE_SIZE_GIB >= 8 )) || _fail "--image-size-gib must be >= 8"
+
+case "${CINDER_OS_PROFILE}" in
+    server)
+        ;;
+    desktop)
+        _warn "Desktop profile flag accepted for compatibility; build-image now produces headless server images only"
+        ;;
+    *)
+        _fail "Unsupported profile '${CINDER_OS_PROFILE}' (expected: server|desktop)"
+        ;;
+esac
 
 [[ -f "${PARTITION_LAYOUT_SCRIPT}" ]] || _fail "Missing script: ${PARTITION_LAYOUT_SCRIPT}"
 [[ -f "${CHROOT_SETUP_SCRIPT}" ]] || _fail "Missing script: ${CHROOT_SETUP_SCRIPT}"
@@ -222,10 +240,12 @@ DATA_UUID="$(blkid -s UUID -o value "${DATA_PART}")"
 
 _step "Mount rootfs"
 rm -rf "${ROOTFS_DIR}"
-mkdir -p "${ROOTFS_DIR}" "${ROOTFS_DIR}/boot/firmware" "${ROOTFS_DIR}/data"
+mkdir -p "${ROOTFS_DIR}"
 
 mount "${ROOT_PART}" "${ROOTFS_DIR}"
 MOUNTED_DIRS+=("${ROOTFS_DIR}")
+
+mkdir -p "${ROOTFS_DIR}/boot/firmware" "${ROOTFS_DIR}/data"
 
 mount "${BOOT_PART}" "${ROOTFS_DIR}/boot/firmware"
 MOUNTED_DIRS+=("${ROOTFS_DIR}/boot/firmware")
