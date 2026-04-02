@@ -200,14 +200,66 @@ jobs:
           )
 
           MAX_RELEASE_ASSET_BYTES=2147483648
+          SPLIT_PART_SIZE_BYTES=1900000000
+          SPLIT_MANIFEST="dist-os/SPLIT-ASSETS.txt"
+          SPLIT_PART_CHECKSUMS="dist-os/SPLIT-PARTS-SHA256SUMS"
+          SPLIT_REASSEMBLE_DOC="dist-os/REASSEMBLE-LARGE-ASSETS.txt"
+          HAD_SPLIT_ASSETS=false
+
+          : > "${SPLIT_MANIFEST}"
+          : > "${SPLIT_PART_CHECKSUMS}"
+
           while IFS= read -r file; do
             FILE_SIZE=$(stat -c%s "$file")
             if (( FILE_SIZE >= MAX_RELEASE_ASSET_BYTES )); then
-              echo "::warning::Skipping ${file} (${FILE_SIZE} bytes). GitHub release assets must be smaller than ${MAX_RELEASE_ASSET_BYTES} bytes."
+              BASENAME="$(basename "${file}")"
+              PART_PREFIX="dist-os/${BASENAME}.part."
+
+              rm -f "${PART_PREFIX}"*
+              split -b "${SPLIT_PART_SIZE_BYTES}" -d -a 4 "${file}" "${PART_PREFIX}"
+
+              PART_COUNT=0
+              while IFS= read -r part; do
+                ASSETS+=("${part}")
+                sha256sum "${part}" >> "${SPLIT_PART_CHECKSUMS}"
+                PART_COUNT=$((PART_COUNT + 1))
+              done < <(find dist-os -maxdepth 1 -type f -name "${BASENAME}.part.*" | sort)
+
+              if (( PART_COUNT == 0 )); then
+                echo "::error::Failed to split oversized asset: ${file}"
+                exit 1
+              fi
+
+              HAD_SPLIT_ASSETS=true
+              echo "${BASENAME}|${FILE_SIZE}|${PART_COUNT}" >> "${SPLIT_MANIFEST}"
+              echo "::warning::Split oversized release asset ${file} (${FILE_SIZE} bytes) into ${PART_COUNT} parts of <= ${SPLIT_PART_SIZE_BYTES} bytes."
               continue
             fi
             ASSETS+=("$file")
           done < <(find dist-os -maxdepth 1 -type f ! -name 'SHA256SUMS' ! -name 'OS-SHA256SUMS' | sort)
+
+          if [[ "${HAD_SPLIT_ASSETS}" == "true" ]]; then
+            {
+              echo "Large asset reassembly instructions"
+              echo
+              echo "One or more release files exceeded GitHub's per-asset size limit (${MAX_RELEASE_ASSET_BYTES} bytes)."
+              echo "Those files were split into part files and uploaded to this release."
+              echo
+              while IFS='|' read -r name size count; do
+                echo "File: ${name}"
+                echo "Original bytes: ${size}"
+                echo "Part count: ${count}"
+                echo "Reassemble command:"
+                echo "  cat ${name}.part.* > ${name}"
+                echo
+              done < "${SPLIT_MANIFEST}"
+              echo "After reassembly, verify checksums using OS-SHA256SUMS/SHA256SUMS and SPLIT-PARTS-SHA256SUMS."
+            } > "${SPLIT_REASSEMBLE_DOC}"
+
+            ASSETS+=("${SPLIT_MANIFEST}" "${SPLIT_PART_CHECKSUMS}" "${SPLIT_REASSEMBLE_DOC}")
+          else
+            rm -f "${SPLIT_MANIFEST}" "${SPLIT_PART_CHECKSUMS}" "${SPLIT_REASSEMBLE_DOC}"
+          fi
 
           UPLOAD_OK=false
           for attempt in 1 2 3 4 5; do
