@@ -151,8 +151,7 @@ jobs:
           sudo ./os/build/build-image.sh \
             --version "${{ needs.build.outputs.version }}" \
             --output-dir "./os/build/output" \
-            --image-size 8 \
-            --profile desktop
+            --image-size-gib 8
 
       - name: Normalize OS artifact ownership
         run: |
@@ -167,7 +166,7 @@ jobs:
             --build-date "${{ steps.osdate.outputs.build_date }}"
 
       - name: Remove raw image from artifact set
-        run: rm -f ./os/build/output/cinder-os-${{ needs.build.outputs.version }}-${{ steps.osdate.outputs.build_date }}.img
+        run: rm -f ./os/build/output/cinder-os-${{ needs.build.outputs.version }}-arm64.img
 
       - name: Create release checksums
         run: ./os/build/release-checksums.sh ./os/build/output ./os/build/output/SHA256SUMS
@@ -177,10 +176,12 @@ jobs:
         with:
           name: cinder-os-images-${{ needs.build.outputs.version }}
           path: |
+            os/build/output/*.img.zst
             os/build/output/*.img.xz
             os/build/output/*.iso
             os/build/output/*.sha256
             os/build/output/SHA256SUMS
+            os/build/output/build-image-*.log
             os/build/output/build-*.log
           retention-days: 14
 
